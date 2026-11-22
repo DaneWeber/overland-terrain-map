@@ -40,6 +40,9 @@
         <button data-tool="river-edge">River on border</button>
         <button data-tool="cliff-cell">Cliff in cell</button>
         <button data-tool="cliff-edge">Cliff on border</button>
+        <button data-tool="site">Settlement / site <kbd>S</kbd></button>
+        <button data-tool="fort">Walls &amp; gates <kbd>W</kbd></button>
+        <button data-tool="label">Label <kbd>L</kbd></button>
       </div>
       <p class="tool-hint" id="tool-hint"></p>
       <div id="brush-row" class="seg" role="group" aria-label="Brush size">
@@ -58,6 +61,24 @@
     <section>
       <h2>Roads</h2>
       <div class="palette" id="road-palette" role="group" aria-label="Road type"></div>
+    </section>
+
+    <section id="sites-section">
+      <h2>Settlements (DMG sizes)</h2>
+      <div class="palette" id="settlement-palette" role="group" aria-label="Settlement size"></div>
+      <h2 class="sub">Special sites</h2>
+      <div class="palette" id="site-palette" role="group" aria-label="Special site"></div>
+      <label class="check"><input type="checkbox" id="ask-name"> Ask for a name when placing</label>
+    </section>
+
+    <section id="fort-section">
+      <h2>Walls &amp; gates</h2>
+      <div class="palette" id="fort-palette" role="group" aria-label="Fortification"></div>
+      <div class="seg" role="group" aria-label="Where to draw walls">
+        <span class="seg-label">Draw</span>
+        <button data-fortmode="edge">On borders</button>
+        <button data-fortmode="cell">Around a whole cell</button>
+      </div>
     </section>
 
     <section>
@@ -91,7 +112,7 @@
 
     <section>
       <details>
-        <summary>Overland movement (PHB Table 9–5)</summary>
+        <summary>Overland movement (SRD)</summary>
         <div id="movement-table"></div>
       </details>
       <details>
@@ -102,6 +123,8 @@
           <li><b>Roads and rivers in cells</b> follow the path you drag, cell to cell. Drag past the map edge to have them run off the map.</li>
           <li>Cliffs, and rivers on borders: clicking one that already exists removes it.</li>
           <li><b>Cliff on border:</b> the teeth point to the low side. Draw with the pointer on the low side, or <b>Shift+click</b> a cliff to flip it.</li>
+          <li><b>Sites</b> sit on top of terrain; the cell keeps its terrain and movement. The terrain icon shrinks into the corner.</li>
+          <li><b>Labels:</b> with the Label tool, click to add, drag to move, click to edit, right-click to delete. "Attach to cell" labels sit under their cell and snap from cell to cell.</li>
           <li><b>1–9</b> pick a terrain. <b>Ctrl+Z</b> undo, <b>Ctrl+Y</b> redo.</li>
           <li><b>Ctrl+scroll</b> or <b>+ / −</b> to zoom. <b>Space+drag</b> or middle-drag to pan.</li>
           <li>Your map saves itself in this browser. Use <b>Save file</b> to keep a copy or move it to another computer.</li>
@@ -154,6 +177,7 @@
         </select>
       </label>
       <label class="check"><input type="checkbox" id="p-ref"> Add a page with the key and movement table</label>
+      <label class="check"><input type="checkbox" id="p-sites"> Add a list of named places with cell numbers</label>
       <label class="check"><input type="checkbox" id="p-color"> Print in color (off = black &amp; white)</label>
       <p id="p-summary" class="p-summary" aria-live="polite"></p>
       <p class="fine">In the browser's print window choose <b>Letter</b> paper and <b>100% / Default</b> scale so the cell size comes out exactly right.</p>
@@ -164,6 +188,22 @@
     </form>
     <div class="pd-preview" id="p-preview" aria-label="Print preview"></div>
   </div>
+</dialog>
+
+<dialog id="label-dialog" aria-labelledby="ld-title">
+  <form class="ld" method="dialog">
+    <h2 id="ld-title">Add label</h2>
+    <label class="field">Text<input id="ld-text" type="text" maxlength="60" autocomplete="off"></label>
+    <label class="field">Size
+      <select id="ld-size"><option value="s">Small</option><option value="m">Medium</option><option value="l">Large</option></select>
+    </label>
+    <label class="check"><input type="checkbox" id="ld-anchor"> Attach to cell (sits under the cell, snaps when moved)</label>
+    <div class="pd-buttons ld-buttons">
+      <button class="primary" value="save">Save</button>
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button id="ld-delete" value="delete" class="danger">Delete</button>
+    </div>
+  </form>
 </dialog>
 
 <div id="print-root"></div>

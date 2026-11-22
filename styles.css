@@ -157,6 +157,20 @@ table.mv td svg { width: 22px; height: 22px; vertical-align: middle; margin-righ
   font-size: 1rem; font-weight: 600; min-height: 40px;
 }
 
+#map .L-label { pointer-events: none; }
+#map.tool-label .L-label { pointer-events: auto; cursor: move; }
+#map.tool-label { cursor: text; }
+.sidebar h2.sub { margin-top: 14px; }
+.seg button:disabled { opacity: .4; }
+
+/* ---------- label dialog ---------- */
+dialog#label-dialog { width: min(440px, 94vw); border: 2px solid #444; border-radius: 10px; padding: 0; }
+.ld { padding: 18px; }
+.ld h2 { margin-top: 0; font-size: 1.2rem; }
+.ld input[type="text"] { font-size: 1.15rem; }
+.ld-buttons { flex-direction: row-reverse; justify-content: flex-start; }
+.ld-buttons .danger { margin-right: auto; border-color: #a40000; color: #a40000; }
+
 /* ---------- print dialog ---------- */
 dialog#print-dialog {
   width: min(1200px, 96vw);
@@ -201,13 +215,18 @@ dialog::backdrop { background: rgba(0,0,0,.45); }
 .pp-map svg { display: block; }
 .pp-map.tiled svg { outline: 0.75pt solid #111; }
 .pp-legend { flex: none; margin-top: .08in; border-top: 1pt solid #111; padding-top: .04in; }
+.ref-page > * { flex-shrink: 0; }
 .ref-page h1 { font-size: 18pt; margin: 0 0 .1in; }
-.ref-page h2 { font-size: 13pt; margin: .15in 0 .06in; }
-.ref-page table { border-collapse: collapse; font-size: 12pt; }
-.ref-page th, .ref-page td { border: 1pt solid #111; padding: .04in .1in; text-align: center; }
+.ref-page h2 { font-size: 13pt; margin: .1in 0 .04in; }
+.ref-page table { border-collapse: collapse; font-size: 10.5pt; }
+.ref-page th, .ref-page td { border: 1pt solid #111; padding: .01in .1in; text-align: center; }
 .ref-page th:first-child, .ref-page td:first-child { text-align: left; }
-.ref-page td svg { width: .32in; height: .32in; vertical-align: middle; margin-right: .06in; }
-.ref-page ul { font-size: 11.5pt; margin: 0; padding-left: .25in; }
+.ref-page td svg { width: .22in; height: .22in; vertical-align: middle; margin-right: .06in; }
+.site-list { columns: 2; column-gap: .3in; font-size: 10.5pt; margin: 0; padding: 0; list-style: none; }
+.site-list li { break-inside: avoid; padding: .015in 0; border-bottom: .5pt solid #bbb; }
+.sl-coord { font-family: "Courier New", monospace; font-weight: 700; display: inline-block; min-width: .6in; }
+.sl-type { color: #333; }
+.ref-page ul { font-size: 10.5pt; margin: 0; padding-left: .25in; }
 .ref-page li { margin: .03in 0; }
 
 @media print {

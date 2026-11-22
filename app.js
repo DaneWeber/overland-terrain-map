@@ -9,7 +9,8 @@
 (function () {
 
 // ---------------------------------------------------------------- constants
-// mv = PHB Table 9-5 overland movement multipliers: [highway, road or trail, trackless]
+// mv = SRD "Terrain and Overland Movement" multipliers: [highway, road or trail, trackless]
+// (checked against https://www.d20srd.org/srd/movement.htm)
 const TERRAINS = [
   { id: 'desert',    name: 'Desert',    abbr: 'De', color: '#f2dc9b', mv: [1, 1/2, 1/2] },
   { id: 'forest',    name: 'Forest',    abbr: 'Fo', color: '#9fd49a', mv: [1, 1, 1/2] },
@@ -28,6 +29,36 @@ const ROADS = [
   { id: 'none',    name: 'Trackless' },
 ];
 const ROAD_NAME = { highway: 'Highway', trail: 'Road / Trail' };
+// Settlements use the DMG community sizes; everything else is a special site. One site per cell,
+// drawn on top of the terrain (the cell keeps its terrain type and movement rules).
+const SITES = [
+  { id: 'thorp',      name: 'Thorp',       group: 'settlement', pop: '20–80' },
+  { id: 'hamlet',     name: 'Hamlet',      group: 'settlement', pop: '81–400' },
+  { id: 'village',    name: 'Village',     group: 'settlement', pop: '401–900' },
+  { id: 'smalltown',  name: 'Small town',  group: 'settlement', pop: '901–2,000' },
+  { id: 'largetown',  name: 'Large town',  group: 'settlement', pop: '2,001–5,000' },
+  { id: 'smallcity',  name: 'Small city',  group: 'settlement', pop: '5,001–12,000' },
+  { id: 'largecity',  name: 'Large city',  group: 'settlement', pop: '12,001–25,000' },
+  { id: 'metropolis', name: 'Metropolis',  group: 'settlement', pop: '25,001+' },
+  { id: 'ruins',      name: 'Ruins',       group: 'site' },
+  { id: 'tower',      name: 'Tower / keep', group: 'site' },
+  { id: 'castle',     name: 'Castle',      group: 'site' },
+  { id: 'temple',     name: 'Temple / shrine', group: 'site' },
+  { id: 'cave',       name: 'Cave / dungeon', group: 'site' },
+  { id: 'bridge',     name: 'Bridge',      group: 'site' },
+  { id: 'ford',       name: 'Ford',        group: 'site' },
+  { id: 'camp',       name: 'Camp',        group: 'site' },
+  { id: 'lair',       name: 'Lair',        group: 'site' },
+  { id: 'poi',        name: 'Point of interest', group: 'site' },
+];
+const SMAP = Object.fromEntries(SITES.map(x => [x.id, x]));
+const FORTS = [
+  { id: 'stockade', name: 'Stockade' },
+  { id: 'wall',     name: 'Stone wall' },
+  { id: 'gate',     name: 'Gate' },
+];
+const EXCLUSIVE = { wall: 'stockade', stockade: 'wall' };
+const LABEL_FS = { s: 0.2, m: 0.28, l: 0.4 };
 
 const TOOL_HINTS = {
   terrain: 'Click or drag to paint the selected terrain. Right-drag clears terrain.',
@@ -38,6 +69,9 @@ const TOOL_HINTS = {
   'river-edge': 'Drag along cell borders to draw a river on the borders.',
   'cliff-cell': 'Click a cell to mark that it contains a cliff.',
   'cliff-edge': 'Drag along cell borders with the pointer on the LOW side. Shift+click a cliff to flip it.',
+  site: 'Click a cell to place the selected settlement or site on top of its terrain. Right-click removes it.',
+  fort: 'Drag along cell borders to build, or choose "Around a whole cell". Clicking an existing wall removes it. Gates go on single borders.',
+  label: 'Click to add a label. Drag a label to move it, click it to edit, right-click it to delete.',
 };
 const EDGE_TOOLS = { 'river-edge': 'river', 'cliff-edge': 'cliff' };
 const BRUSH_TOOLS = new Set(['terrain', 'erase']);
@@ -128,9 +162,65 @@ const SYMBOLS = {
     `<path d="M-9.5,8h5M-2,8h4M4.5,8h5"/>`,
 };
 
+// ---- settlement & site icons (same -10..10 box)
+const house = (x, y, s) => `<path d="M${f(x - 2*s)},${y}V${f(y - 2.6*s)}L${x},${f(y - 4.8*s)}L${f(x + 2*s)},${f(y - 2.6*s)}V${y}Z" ${LIGHT}/>`;
+const church = (x, y, s) => `<path d="M${f(x - 1.3*s)},${y}V${f(y - 4*s)}L${x},${f(y - 7*s)}L${f(x + 1.3*s)},${f(y - 4*s)}V${y}Z" ${LIGHT}/>` +
+  `<path d="M${x},${f(y - 7*s)}V${f(y - 9*s)}M${f(x - 0.8*s)},${f(y - 8.2*s)}H${f(x + 0.8*s)}"/>`;
+const ring = `<circle r="9.3" ${LIGHT}/><circle r="7.9" fill="none"/>`;
+const towers = [[0, -8.6], [8.6, 0], [0, 8.6], [-8.6, 0]].map(([x, y]) => `<rect x="${x - 1.7}" y="${y - 1.7}" width="3.4" height="3.4" ${LIGHT}/>`).join('');
+// Crenellated block: merlons along the top edge.
+const cren = (x0, x1, yt, yb, n) => {
+  const w = (x1 - x0) / (2 * n - 1);
+  let d = `M${x0},${yb}V${yt}`;
+  for (let i = 0; i < 2 * n - 1; i++) {
+    const xa = f(x0 + (i + 1) * w);
+    d += i % 2 === 0 ? `H${xa}` + (i < 2 * n - 2 ? `V${yt + 1.5}` : '') : `H${xa}V${yt}`;
+  }
+  return `<path d="${d}V${yb}Z" ${LIGHT}/>`;
+};
+const star = (r1, r2) => 'M' + Array.from({ length: 10 }, (_, i) => {
+  const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? r2 : r1;
+  return f(r * Math.cos(a)) + ',' + f(r * Math.sin(a));
+}).join('L') + 'Z';
+const waves = y => `M-9,${y}q2.25,-1.6 4.5,0t4.5,0t4.5,0t4.5,0`;
+const SITE_SYMBOLS = {
+  thorp: house(0, 5, 1.7),
+  hamlet: house(-3.6, 7, 1.4) + house(3.6, 2, 1.4),
+  village: house(0, 0, 1.2) + house(-5, 8, 1.2) + house(5, 8, 1.2),
+  smalltown: house(-5.6, 7, 1.15) + house(5.6, 7, 1.15) + church(0, 7, 1.2),
+  largetown: house(-6, 3, 1) + house(6, 3, 1) + church(0, 3.5, 1.05) + house(-2.8, 9.5, 1) + house(2.8, 9.5, 1),
+  smallcity: ring + church(0, 3, 0.95) + house(-4.4, 5, 0.85) + house(4.4, 5, 0.85),
+  largecity: ring + towers + church(0, 3, 0.95) + house(-4.2, 5, 0.8) + house(4.2, 5, 0.8),
+  metropolis: ring + towers +
+    `<path d="M-4.5,5V0A4.5,4.5 0 0 1 4.5,0V5Z" ${LIGHT}/><path d="M0,-4.5V-6.5"/>` +
+    `<path d="M-6.2,5V-2.5L-5.5,-4L-4.8,-2.5V5M4.8,5V-2.5L5.5,-4L6.2,-2.5V5" ${LIGHT}/><path d="M-6.5,5H6.5"/>`,
+  ruins: `<path d="M-9.5,8H9.5"/>` +
+    `<path d="M-7.5,8V-1L-6.4,-2.2L-5.6,-0.6L-4.8,-1.6V8Z" ${LIGHT}/>` +
+    `<path d="M-1.4,8V-6L-0.2,-7.6L0.5,-5.4L1.4,-6.6V8Z" ${LIGHT}/>` +
+    `<path d="M4.4,8V3L5.5,1.8L6.3,3.5L7.2,2.4V8Z" ${LIGHT}/>` +
+    `<g fill="currentColor" stroke="none">${dots([[2.9, 7.1], [8.6, 6.8], [-3.1, 7.2]], 0.9)}</g>`,
+  tower: cren(-3.6, 3.6, -9, 9, 3) + `<path d="M0,-3.5V-0.5"/><path d="M-1.4,9V6.2A1.4,1.4 0 0 1 1.4,6.2V9Z" fill="currentColor" stroke="none"/>`,
+  castle: cren(-5, 5, -2, 8, 3) + cren(-9.5, -4.5, -7, 8, 2) + cren(4.5, 9.5, -7, 8, 2) +
+    `<path d="M-1.7,8V5A1.7,1.7 0 0 1 1.7,5V8Z" fill="currentColor" stroke="none"/>`,
+  temple: `<path d="M-8.5,-2.5L0,-8.5L8.5,-2.5Z" ${LIGHT}/><path d="M-8,-2.5H8V-1H-8Z" ${LIGHT}/>` +
+    `<path d="M-6,-1V6M-2,-1V6M2,-1V6M6,-1V6"/><path d="M-8.5,6H8.5V8H-8.5Z" ${LIGHT}/>`,
+  cave: `<path d="M-10,8Q-8,-7.5 0,-7.5Q8,-7.5 10,8Z" ${LIGHT}/><path d="M-4.5,8V3A4.5,4.5 0 0 1 4.5,3V8Z" fill="currentColor" stroke="none"/>` +
+    `<path d="M-6.5,-2.5l2,1M5,-4l2,2"/>`,
+  bridge: `<path d="M-10,-3H10V4H7A7,5.5 0 0 0 -7,4H-10Z" ${LIGHT}/>` +
+    `<path d="M-10,-5.5H10M-8,-5.5V-3M-4,-5.5V-3M0,-5.5V-3M4,-5.5V-3M8,-5.5V-3"/><path d="${waves(8)}"/>`,
+  ford: `<path d="${waves(-3)}${waves(4)}"/>` +
+    `<g fill="currentColor" stroke="none"><ellipse cx="0" cy="-7.5" rx="2.2" ry="1.3"/><ellipse cx="0.5" cy="0.5" rx="2.2" ry="1.3"/><ellipse cx="0" cy="7.8" rx="2.2" ry="1.3"/></g>`,
+  camp: `<path d="M-9.5,7L-3,-6.5L3.5,7Z" ${LIGHT}/><path d="M-3,-6.5L-4.8,7M-3,-6.5L-1.2,7M-3,-6.5L-3,-9L-0.5,-8.2L-3,-7.5"/>` +
+    `<path d="M7.3,6.5c-2.2,-2 -1.2,-4.5 0,-6.5c1.2,2 2.2,4.5 0,6.5Z" fill="currentColor" stroke="none"/><path d="M4.6,8.2L10,6.4M4.6,6.4L10,8.2"/>`,
+  lair: `<path d="M-6,1.5A6.6,6.6 0 1 1 6,1.5V4.5H3.2V7.5H-3.2V4.5H-6Z" ${LIGHT}/>` +
+    `<g fill="currentColor" stroke="none"><circle cx="-2.7" cy="-1.3" r="1.9"/><circle cx="2.7" cy="-1.3" r="1.9"/><path d="M0,1.2L-1.1,3.3H1.1Z"/></g><path d="M-1,4.5V7.5M1,4.5V7.5"/>`,
+  poi: `<path d="${star(9.5, 4)}" fill="currentColor"/>`,
+};
+
 function installSymbols() {
-  $('#symbol-defs').innerHTML = TERRAINS.map(t =>
-    `<symbol id="sym-${t.id}" viewBox="-10 -10 20 20" overflow="visible">${SYMBOLS[t.id]}</symbol>`).join('');
+  $('#symbol-defs').innerHTML =
+    TERRAINS.map(t => `<symbol id="sym-${t.id}" viewBox="-10 -10 20 20" overflow="visible">${SYMBOLS[t.id]}</symbol>`).join('') +
+    SITES.map(x => `<symbol id="site-${x.id}" viewBox="-10 -10 20 20" overflow="visible">${SITE_SYMBOLS[x.id]}</symbol>`).join('');
 }
 
 // ---------------------------------------------------------------- geometry
@@ -216,12 +306,13 @@ function defaultState() {
     edges: {},   // "c,r|c,r" -> { river: true, cliff: "c,r" (the low side) }
     roadLinks: {},  // "c,r|c,r" -> true: road runs between these two cells (one may be just off the map)
     riverLinks: {}, // same for rivers running through cells
+    labels: [],     // { id, text, size: 's'|'m'|'l', cell: "c,r" (attached) | x, y (floating, cell units) }
     view: { colors: true, icons: true, labels: false, coords: false, mileLines: true },
-    print: { orientation: 'auto', mode: 'fit', cellInches: 1, margin: 0.5, legend: 'every', refPage: true, color: true },
+    print: { orientation: 'auto', mode: 'fit', cellInches: 1, margin: 0.5, legend: 'every', refPage: true, siteList: true, color: true },
   };
 }
 let S, G;
-const ui = { tool: 'terrain', terrain: 'plains', road: 'highway', brush: 0, zoom: 1 };
+const ui = { tool: 'terrain', terrain: 'plains', road: 'highway', site: 'village', fort: 'stockade', fortMode: 'edge', askName: true, brush: 0, zoom: 1 };
 let undoStack = [], redoStack = [];
 
 function normalizeState(raw) {
@@ -231,14 +322,15 @@ function normalizeState(raw) {
   s.print = Object.assign(defaultState().print, raw && raw.print);
   s.cells = s.cells || {}; s.edges = s.edges || {};
   s.roadLinks = s.roadLinks || {}; s.riverLinks = s.riverLinks || {};
+  s.labels = Array.isArray(s.labels) ? s.labels : [];
   if (s.gridType !== 'square') s.gridType = 'hex';
   if (!(s.cols > 0 && s.rows > 0)) Object.assign(s, dims(s.gridType, s.widthMiles, s.heightMiles, s.cellsPerMile));
   return s;
 }
 
 function snapshot() {
-  const { title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks } = S;
-  return JSON.stringify({ title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks });
+  const { title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels } = S;
+  return JSON.stringify({ title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels });
 }
 function restore(snap) {
   Object.assign(S, JSON.parse(snap));
@@ -330,6 +422,77 @@ function cliffMark(ax, ay, bx, by, lx, ly) {
          `<path d="${line}" stroke="${INK}" stroke-width="0.055" stroke-linecap="round"/>` +
          `<path d="${teeth}" fill="${INK}"/>`;
 }
+function edgeFrame(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+  return { ax: a[0], ay: a[1], dx, dy, len, ux, uy, nx: -uy, ny: ux, at: t => [a[0] + dx * t, a[1] + dy * t] };
+}
+const segD = (x1, y1, x2, y2) => `M${f(x1)},${f(y1)}L${f(x2)},${f(y2)}`;
+// Stockade: a thin line crossed by short posts (a palisade).
+function stockadeMark(a, b) {
+  const E = edgeFrame(a, b), n = Math.max(3, Math.round(E.len / 0.075));
+  let posts = '';
+  for (let k = 0; k < n; k++) {
+    const [px, py] = E.at((k + 0.5) / n);
+    posts += segD(px - E.nx * 0.065, py - E.ny * 0.065, px + E.nx * 0.065, py + E.ny * 0.065);
+  }
+  const line = segD(a[0], a[1], b[0], b[1]);
+  return stockadeLayers(line, posts);
+}
+function stockadeLayers(lines, posts) {
+  return `<path d="${lines}${posts}" stroke="#fff" stroke-width="0.09" stroke-linecap="round" fill="none"/>` +
+         `<path d="${lines}" stroke="${INK}" stroke-width="0.03" stroke-linecap="round" fill="none"/>` +
+         `<path d="${posts}" stroke="${INK}" stroke-width="0.03" stroke-linecap="round" fill="none"/>`;
+}
+function stockadeParts(a, b) {
+  const E = edgeFrame(a, b), n = Math.max(3, Math.round(E.len / 0.075));
+  let posts = '';
+  for (let k = 0; k < n; k++) {
+    const [px, py] = E.at((k + 0.5) / n);
+    posts += segD(px - E.nx * 0.065, py - E.ny * 0.065, px + E.nx * 0.065, py + E.ny * 0.065);
+  }
+  return { line: segD(a[0], a[1], b[0], b[1]), extra: posts };
+}
+// Stone wall: thick double line with square merlons alternating on both sides.
+function wallMark(a, b) {
+  const E = edgeFrame(a, b), n = Math.max(2, Math.round(E.len / 0.14)), h = 0.028;
+  let cren = '';
+  for (let k = 0; k < n; k++) {
+    const [px, py] = E.at((k + 0.5) / n), side = k % 2 ? 1 : -1;
+    const cx = px + E.nx * side * 0.092, cy = py + E.ny * side * 0.092;
+    cren += `M${f(cx - E.ux * h - E.nx * h)},${f(cy - E.uy * h - E.ny * h)}L${f(cx + E.ux * h - E.nx * h)},${f(cy + E.uy * h - E.ny * h)}` +
+            `L${f(cx + E.ux * h + E.nx * h)},${f(cy + E.uy * h + E.ny * h)}L${f(cx - E.ux * h + E.nx * h)},${f(cy - E.uy * h + E.ny * h)}Z`;
+  }
+  return wallLayers(segD(a[0], a[1], b[0], b[1]), cren);
+}
+// Drawn in passes (halo, body, inner line, merlons) so joined segments meet cleanly at corners.
+function wallLayers(lines, cren) {
+  return `<path d="${lines}" stroke="#fff" stroke-width="0.27" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
+         `<path d="${cren}" fill="#fff" stroke="#fff" stroke-width="0.06" stroke-linejoin="round"/>` +
+         `<path d="${lines}" stroke="${INK}" stroke-width="0.13" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
+         `<path d="${lines}" stroke="#fff" stroke-width="0.05" stroke-linecap="round" stroke-linejoin="round" fill="none"/>` +
+         `<path d="${cren}" fill="${INK}"/>`;
+}
+function wallParts(a, b) {
+  const E = edgeFrame(a, b), n = Math.max(2, Math.round(E.len / 0.14)), h = 0.028;
+  let cren = '';
+  for (let k = 0; k < n; k++) {
+    const [px, py] = E.at((k + 0.5) / n), side = k % 2 ? 1 : -1;
+    const cx = px + E.nx * side * 0.092, cy = py + E.ny * side * 0.092;
+    cren += `M${f(cx - E.ux * h - E.nx * h)},${f(cy - E.uy * h - E.ny * h)}L${f(cx + E.ux * h - E.nx * h)},${f(cy + E.uy * h - E.ny * h)}` +
+            `L${f(cx + E.ux * h + E.nx * h)},${f(cy + E.uy * h + E.ny * h)}L${f(cx - E.ux * h + E.nx * h)},${f(cy - E.uy * h + E.ny * h)}Z`;
+  }
+  return { line: segD(a[0], a[1], b[0], b[1]), extra: cren };
+}
+// Gate: a gap in the middle of the border with a heavy post on each side.
+function gateMark(a, b) {
+  const E = edgeFrame(a, b), [g1x, g1y] = E.at(0.3), [g2x, g2y] = E.at(0.7);
+  const posts = segD(g1x - E.nx * 0.14, g1y - E.ny * 0.14, g1x + E.nx * 0.14, g1y + E.ny * 0.14) +
+                segD(g2x - E.nx * 0.14, g2y - E.ny * 0.14, g2x + E.nx * 0.14, g2y + E.ny * 0.14);
+  return `<path d="${segD(g1x, g1y, g2x, g2y)}" stroke="#fff" stroke-width="0.3" fill="none"/>` +
+         `<path d="${segD(g1x, g1y, g2x, g2y)}" stroke="${INK}" stroke-width="0.02" stroke-dasharray="0.03 0.03" fill="none"/>` +
+         `<path d="${posts}" stroke="#fff" stroke-width="0.11" stroke-linecap="round" fill="none"/>` +
+         `<path d="${posts}" stroke="${INK}" stroke-width="0.06" stroke-linecap="round" fill="none"/>`;
+}
 function cellCliffMark(x, y) { return cliffMark(x - 0.34, y + 0.24, x + 0.34, y + 0.24, x, y + 1); }
 
 function iconStrokeWidth(ro) { return f(ro.lw * 1.15 * 20 / (ro.labels ? 0.48 : 0.62)); }
@@ -364,7 +527,27 @@ function cellIconSVG(c, r, ro) {
   const cell = S.cells[key(c, r)];
   if (!cell || !cell.t) return '';
   const [x, y] = G.center(c, r);
-  return terrainMark(cell.t, x, y, ro);
+  if (!cell.site) return terrainMark(cell.t, x, y, ro);
+  // A site occupies the middle of the cell, so the terrain icon moves small into the top-left.
+  let out = '';
+  if (ro.icons) {
+    const s = 0.3;
+    out += `<use href="#sym-${cell.t}" x="${f(x - 0.24 - s / 2)}" y="${f(y - 0.2 - s / 2)}" width="${s}" height="${s}" stroke-width="${f(ro.lw * 1.1 * 20 / s)}"/>`;
+  }
+  if (ro.labels || !ro.icons) {
+    out += `<text x="${f(x + 0.24)}" y="${f(y - 0.14)}" font-size="0.15" font-family="${FONT}" font-weight="700" text-anchor="middle" fill="${INK}" stroke="none">${TMAP[cell.t].abbr}</text>`;
+  }
+  return out;
+}
+function siteMark(id, x, y, s, lw) {
+  return `<circle cx="${f(x)}" cy="${f(y)}" r="${f(s * 0.56)}" fill="#fff" fill-opacity="0.9" stroke="none"/>` +
+    `<use href="#site-${id}" x="${f(x - s / 2)}" y="${f(y - s / 2)}" width="${s}" height="${s}" stroke-width="${f(lw * 1.25 * 20 / s)}"/>`;
+}
+function cellSiteSVG(c, r, ro) {
+  const cell = S.cells[key(c, r)];
+  if (!cell || !cell.site || !SMAP[cell.site]) return '';
+  const [x, y] = G.center(c, r);
+  return cell.t ? siteMark(cell.site, x + 0.06, y + 0.05, 0.48, ro.lw) : siteMark(cell.site, x, y, 0.56, ro.lw);
 }
 // Edge midpoints toward every neighbor this cell's road/river is linked to.
 function linkEnds(c, r, prop) {
@@ -386,7 +569,9 @@ function cellFeatSVG(c, r) {
   return out;
 }
 function edgesSVG(vb) {
-  let rivers = '', cliffs = '';
+  let rivers = '', cliffs = '', gates = '';
+  const st = { line: '', extra: '' }, wl = { line: '', extra: '' };
+  const add = (acc, part) => { acc.line += part.line; acc.extra += part.extra; };
   for (const [k, e] of Object.entries(S.edges)) {
     const g = edgeGeom(k);
     if (!g) continue;
@@ -396,8 +581,11 @@ function edgesSVG(vb) {
       const [lc, lr] = parseKey(e.cliff), [lx, ly] = G.center(lc, lr);
       cliffs += cliffMark(g.a[0], g.a[1], g.b[0], g.b[1], lx, ly);
     }
+    if (e.stockade) add(st, stockadeParts(g.a, g.b));
+    if (e.wall) add(wl, wallParts(g.a, g.b));
+    if (e.gate) gates += gateMark(g.a, g.b);
   }
-  return rivers + cliffs;
+  return rivers + cliffs + (st.line ? stockadeLayers(st.line, st.extra) : '') + (wl.line ? wallLayers(wl.line, wl.extra) : '') + gates;
 }
 function gridSVG(ro, vb) {
   let d = '';
@@ -416,17 +604,31 @@ function gridSVG(ro, vb) {
   }
   return out;
 }
+function labelPos(L) {
+  if (L.cell) { const [x, y] = G.center(...parseKey(L.cell)); return [x, y + 0.42]; }
+  return [L.x, L.y];
+}
+function labelsSVG(ro, vb) {
+  return S.labels.map(L => {
+    const [x, y] = labelPos(L);
+    if (vb && !inView(vb, x, y)) return '';
+    let fs = LABEL_FS[L.size] || LABEL_FS.m;
+    if (ro.labelMin) fs = Math.max(fs, ro.labelMin * fs / LABEL_FS.m);
+    return `<g data-label="${esc(L.id)}"><text x="${f(x)}" y="${f(y)}" dy="0.35em" font-size="${f(fs)}" font-weight="700" font-family="${FONT}" ` +
+      `text-anchor="middle" fill="${INK}" stroke="#fff" stroke-width="${f(fs * 0.3)}" stroke-linejoin="round" paint-order="stroke">${esc(L.text)}</text></g>`;
+  }).join('');
+}
 function inView(vb, x, y) { return x > vb.x - 1 && x < vb.x + vb.w + 1 && y > vb.y - 1 && y < vb.y + vb.h + 1; }
 
 /* Whole-map SVG content. In the editor (wrap=true) every cell gets its own <g> in each
  * layer so single cells can be redrawn. For print, vb limits output to the visible page. */
 function mapContentSVG(ro, vb, wrap) {
-  let fill = '', icon = '', coord = '', feat = '';
+  let fill = '', icon = '', coord = '', feat = '', site = '';
   for (let r = 0; r < S.rows; r++) for (let c = 0; c < S.cols; c++) {
     if (vb && !inView(vb, ...G.center(c, r))) continue;
-    const fi = cellFillSVG(c, r, ro), ic = cellIconSVG(c, r, ro), fe = cellFeatSVG(c, r);
-    if (wrap) { fill += `<g>${fi}</g>`; icon += `<g>${ic}</g>`; feat += `<g>${fe}</g>`; }
-    else { fill += fi; icon += ic; feat += fe; }
+    const fi = cellFillSVG(c, r, ro), ic = cellIconSVG(c, r, ro), fe = cellFeatSVG(c, r), si = cellSiteSVG(c, r, ro);
+    if (wrap) { fill += `<g>${fi}</g>`; icon += `<g>${ic}</g>`; feat += `<g>${fe}</g>`; site += `<g>${si}</g>`; }
+    else { fill += fi; icon += ic; feat += fe; site += si; }
     if (ro.coords) {
       const [x, y] = G.center(c, r);
       coord += `<text x="${f(x)}" y="${f(y - 0.36)}">${coordLabel(c, r)}</text>`;
@@ -437,7 +639,9 @@ function mapContentSVG(ro, vb, wrap) {
     `<g class="L-icon" ${iconGroupAttrs(ro)}>${icon}</g>` +
     `<g class="L-coord" font-size="0.11" font-family="${FONT}" fill="#333" text-anchor="middle">${coord}</g>` +
     `<g class="L-feat">${feat}</g>` +
-    `<g class="L-edge">${edgesSVG(vb)}</g>`;
+    `<g class="L-edge">${edgesSVG(vb)}</g>` +
+    `<g class="L-site" ${iconGroupAttrs(ro)}>${site}</g>` +
+    `<g class="L-label">${labelsSVG(ro, vb)}</g>`;
 }
 
 // ---------------------------------------------------------------- editor rendering
@@ -451,7 +655,7 @@ function renderAll() {
   const W = G.width + 2 * PAD, H = G.height + 2 * PAD;
   svg.setAttribute('viewBox', `${-PAD} ${-PAD} ${f(W)} ${f(H)}`);
   svg.innerHTML = mapContentSVG(editorRO(), null, true) + '<g class="L-hover" pointer-events="none"></g>';
-  for (const n of ['fill', 'icon', 'feat', 'edge', 'hover']) layers[n] = svg.querySelector('.L-' + n);
+  for (const n of ['fill', 'icon', 'feat', 'edge', 'site', 'label', 'hover']) layers[n] = svg.querySelector('.L-' + n);
   applyZoom();
   updateMapInfo();
   $('#map-title').value = S.title;
@@ -466,8 +670,10 @@ function redrawCells(set) {
     layers.fill.children[i].innerHTML = cellFillSVG(c, r, ro);
     layers.icon.children[i].innerHTML = cellIconSVG(c, r, ro);
     layers.feat.children[i].innerHTML = cellFeatSVG(c, r);
+    layers.site.children[i].innerHTML = cellSiteSVG(c, r, ro);
   }
 }
+function redrawLabels() { layers.label.innerHTML = labelsSVG(editorRO(), null); }
 function withNeighbors(set) {
   const out = new Set(set);
   for (const k of set) {
@@ -550,6 +756,7 @@ function applyCell(c, r) {
   switch (ui.tool) {
     case 'terrain': if (er) delete n.t; else n.t = ui.terrain; break;
     case 'cliff-cell': if (stroke.mode === 'add') n.cliff = true; else delete n.cliff; break;
+    case 'site': if (er || ui.site === 'none') delete n.site; else n.site = ui.site; break;
     case 'erase': for (const p of Object.keys(n)) delete n[p]; break;
   }
   let changed = false;
@@ -599,11 +806,40 @@ function linkPaint(c, r) {
   if (dirty.size) { stroke.changed = true; redrawCells(withNeighbors(dirty)); }
 }
 
+// Which border feature the current tool draws, or null if it works on whole cells.
+function edgeProp() {
+  if (EDGE_TOOLS[ui.tool]) return EDGE_TOOLS[ui.tool];
+  if (ui.tool === 'fort' && (ui.fortMode === 'edge' || ui.fort === 'gate')) return ui.fort;
+  return null;
+}
+// Set (val) or clear (val == null) one feature on a border. Walls and stockades replace each other.
+function setEdgeProp(k, prop, val) {
+  const cur = S.edges[k], n = Object.assign({}, cur);
+  if (val == null) {
+    if (!cur || !(prop in cur)) return false;
+    delete n[prop];
+  } else {
+    if (cur && cur[prop] === val) return false;
+    n[prop] = val;
+    if (EXCLUSIVE[prop]) delete n[EXCLUSIVE[prop]];
+  }
+  if (Object.keys(n).length) S.edges[k] = n; else delete S.edges[k];
+  return true;
+}
+// "Around a whole cell": every border of the cell gets (or loses) the wall/stockade.
+function fortCell(c, r) {
+  const prop = ui.fort, keys = Array.from({ length: G.n }, (_, i) => edgeKey(c, r, ...G.nb(c, r, i)));
+  if (!stroke.mode) stroke.mode = (stroke.erase || keys.every(k => S.edges[k] && S.edges[k][prop])) ? 'remove' : 'add';
+  let changed = false;
+  for (const k of keys) changed = setEdgeProp(k, prop, stroke.mode === 'add' ? true : null) || changed;
+  if (changed) { stroke.changed = true; redrawEdges(); }
+}
+
 function applyEdgeAt(x, y) {
   const e = pickEdge(x, y);
   if (!e || e.key === stroke.lastEdge) return;
   stroke.lastEdge = e.key;
-  const prop = EDGE_TOOLS[ui.tool], cur = S.edges[e.key];
+  const prop = edgeProp(), cur = S.edges[e.key];
   if (stroke.shift && prop === 'cliff') {
     if (cur && cur.cliff) {
       const [a, b] = e.key.split('|');
@@ -614,26 +850,19 @@ function applyEdgeAt(x, y) {
     return;
   }
   if (!stroke.mode) stroke.mode = (stroke.erase || (cur && cur[prop])) ? 'remove' : 'add';
-  if (stroke.mode === 'add') {
-    const val = prop === 'cliff' ? e.cell : true;
-    if (!cur || cur[prop] !== val) { S.edges[e.key] = Object.assign({}, cur, { [prop]: val }); stroke.changed = true; }
-  } else if (cur && cur[prop]) {
-    const n = Object.assign({}, cur);
-    delete n[prop];
-    if (Object.keys(n).length) S.edges[e.key] = n; else delete S.edges[e.key];
-    stroke.changed = true;
-  }
+  if (setEdgeProp(e.key, prop, stroke.mode === 'add' ? (prop === 'cliff' ? e.cell : true) : null)) stroke.changed = true;
   redrawEdges();
 }
 
 function applyAt(x, y) {
-  if (EDGE_TOOLS[ui.tool]) return applyEdgeAt(x, y);
+  if (edgeProp()) return applyEdgeAt(x, y);
   const [c, r] = G.pick(x, y);
   const k = key(c, r);
   if (k === stroke.lastCell) return;
   if (LINK_TOOLS[ui.tool]) { stroke.lastCell = k; return linkPaint(c, r); }
   if (!G.inB(c, r)) return;
   stroke.lastCell = k;
+  if (ui.tool === 'fort') return fortCell(c, r);
   if (!stroke.mode && ui.tool === 'cliff-cell') {
     const cur = S.cells[k];
     stroke.mode = (stroke.erase || (cur && cur.cliff)) ? 'remove' : 'add';
@@ -673,8 +902,9 @@ function onPointerDown(e) {
   e.preventDefault();
   svg.setPointerCapture(e.pointerId);
   const [x, y] = evtPt(e);
+  if (ui.tool === 'label') { labelPointerDown(e, x, y); return; }
   stroke = { before: snapshot(), erase: e.button === 2, shift: e.shiftKey, mode: null, changed: false,
-             lastCell: null, lastEdge: null, lastPt: [x, y], pointerId: e.pointerId };
+             lastCell: null, lastEdge: null, lastPt: [x, y], pointerId: e.pointerId, moved: false };
   if (ui.tool === 'fill') {
     const [c, r] = G.pick(x, y);
     stroke.changed = floodFill(c, r, stroke.erase);
@@ -687,8 +917,10 @@ function onPointerDown(e) {
 function onPointerMove(e) {
   if (pan) { doPan(e); return; }
   const [x, y] = evtPt(e);
+  if (labelDrag) { labelPointerMove(x, y); return; }
   showHover(x, y);
   if (!stroke || e.pointerId !== stroke.pointerId) return;
+  if (Math.hypot(x - stroke.lastPt[0], y - stroke.lastPt[1]) > 0.05) stroke.moved = true;
   const [lx, ly] = stroke.lastPt, steps = Math.max(1, Math.ceil(Math.hypot(x - lx, y - ly) / 0.2));
   for (let i = 1; i <= steps; i++) applyAt(lx + (x - lx) * i / steps, ly + (y - ly) * i / steps);
   stroke.lastPt = [x, y];
@@ -696,10 +928,16 @@ function onPointerMove(e) {
 function endStroke() {
   if (!stroke) return;
   if (stroke.changed) { pushUndo(stroke.before); scheduleSave(); }
+  // Placing a single site by click: offer to name it (an attached label under the cell).
+  if (ui.tool === 'site' && ui.askName && stroke.changed && !stroke.erase && !stroke.moved && ui.site !== 'none' && stroke.lastCell) {
+    const k = stroke.lastCell;
+    if (!S.labels.some(L => L.cell === k)) setTimeout(() => openLabelDialog({ mode: 'new', cell: k, x: 0, y: 0, hint: SMAP[ui.site].name }), 0);
+  }
   stroke = null;
 }
 function onPointerUp(e) {
   if (pan) { endPan(); return; }
+  if (labelDrag) { labelPointerUp(); return; }
   if (stroke && e.pointerId === stroke.pointerId) endStroke();
 }
 
@@ -722,17 +960,18 @@ function hl(d) {
          `<path d="${d}" fill="none" stroke="#d40000" stroke-width="0.05" stroke-dasharray="0.09 0.06" stroke-linejoin="round"/>`;
 }
 function showHover(x, y) {
-  if (EDGE_TOOLS[ui.tool]) {
+  if (edgeProp()) {
     const e = pickEdge(x, y);
     layers.hover.innerHTML = e ? hl(`M${f(e.a[0])},${f(e.a[1])}L${f(e.b[0])},${f(e.b[1])}`) : '';
   }
   const [c, r] = G.pick(x, y);
   if (!G.inB(c, r)) {
-    if (!EDGE_TOOLS[ui.tool]) layers.hover.innerHTML = '';
+    if (!edgeProp()) layers.hover.innerHTML = '';
     $('#status').textContent = ' ';
     return;
   }
-  if (!EDGE_TOOLS[ui.tool]) {
+  if (ui.tool === 'label') layers.hover.innerHTML = '';
+  else if (!edgeProp()) {
     const targets = BRUSH_TOOLS.has(ui.tool) && ui.brush > 0 ? cellsWithin(c, r, ui.brush) : [[c, r]];
     layers.hover.innerHTML = hl(targets.map(([cc, rr]) => 'M' + G.corners(cc, rr).map(p => f(p[0]) + ',' + f(p[1])).join('L') + 'Z').join(''));
   }
@@ -749,7 +988,85 @@ function cellInfo(c, r) {
   }
   if (cell.river) parts.push('river');
   if (cell.cliff) parts.push('cliff');
+  if (cell.site && SMAP[cell.site]) parts.push(SMAP[cell.site].name);
+  const k = key(c, r), names = S.labels.filter(L => labelCell(L) === k).map(L => `"${L.text}"`);
+  if (names.length) parts.push(names.join(', '));
   return parts.join('  ·  ');
+}
+
+// ---------------------------------------------------------------- labels
+let labelDrag = null, labelEdit = null;
+const newId = () => 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+function labelCell(L) {
+  if (L.cell) return L.cell;
+  const [c, r] = G.pick(L.x, L.y);
+  return G.inB(c, r) ? key(c, r) : null;
+}
+function labelPointerDown(e, x, y) {
+  const g = e.target.closest && e.target.closest('[data-label]');
+  const L = g && S.labels.find(l => l.id === g.dataset.label);
+  if (e.button === 2) {
+    if (L) { const before = snapshot(); S.labels = S.labels.filter(l => l !== L); pushUndo(before); redrawLabels(); scheduleSave(); }
+    return;
+  }
+  if (L) {
+    const [lx, ly] = labelPos(L);
+    labelDrag = { id: L.id, before: snapshot(), start: [x, y], off: [lx - x, ly - y], moved: false };
+    return;
+  }
+  const [c, r] = G.pick(x, y);
+  openLabelDialog({ mode: 'new', cell: G.inB(c, r) ? key(c, r) : null, x, y });
+}
+function labelPointerMove(x, y) {
+  const d = labelDrag, L = S.labels.find(l => l.id === d.id);
+  if (!L) return;
+  if (!d.moved && Math.hypot(x - d.start[0], y - d.start[1]) < 0.08) return;
+  d.moved = true;
+  if (L.cell) {
+    const [c, r] = G.pick(x, y);
+    if (G.inB(c, r)) L.cell = key(c, r);
+  } else { L.x = x + d.off[0]; L.y = y + d.off[1]; }
+  redrawLabels();
+}
+function labelPointerUp() {
+  const d = labelDrag;
+  labelDrag = null;
+  if (d.moved) { pushUndo(d.before); scheduleSave(); return; }
+  const L = S.labels.find(l => l.id === d.id);
+  if (L) openLabelDialog({ mode: 'edit', id: L.id });
+}
+function openLabelDialog(opts) {
+  labelEdit = opts;
+  const L = opts.mode === 'edit' ? S.labels.find(l => l.id === opts.id) : null;
+  $('#ld-title').textContent = L ? 'Edit label' : (opts.hint ? `Name this ${opts.hint.toLowerCase()}` : 'Add label');
+  $('#ld-text').value = L ? L.text : '';
+  $('#ld-size').value = L ? (L.size || 'm') : 'm';
+  $('#ld-anchor').checked = L ? !!L.cell : !!opts.cell;
+  $('#ld-anchor').disabled = !L && !opts.cell;
+  $('#ld-delete').hidden = !L;
+  $('#label-dialog').showModal();
+  $('#ld-text').focus();
+}
+function closeLabelDialog(action) {
+  const opts = labelEdit;
+  labelEdit = null;
+  if (!opts || action === 'cancel') return;
+  const before = snapshot();
+  const text = $('#ld-text').value.trim(), size = $('#ld-size').value, anchor = $('#ld-anchor').checked;
+  let L = opts.mode === 'edit' ? S.labels.find(l => l.id === opts.id) : null;
+  if (action === 'delete' || (!text && L)) {
+    if (L) S.labels = S.labels.filter(l => l !== L);
+  } else if (text) {
+    if (!L) { L = { id: newId() }; S.labels.push(L); }
+    const [px, py] = L.text !== undefined ? labelPos(L) : [opts.x, opts.y];
+    const cell = L.cell || opts.cell || labelCell({ x: px, y: py });
+    L.text = text; L.size = size;
+    if (anchor && cell) { L.cell = cell; delete L.x; delete L.y; }
+    else { delete L.cell; L.x = px; L.y = py; }
+  } else return;
+  pushUndo(before);
+  redrawLabels();
+  scheduleSave();
 }
 
 // ---------------------------------------------------------------- map setup (resize / rescale)
@@ -775,7 +1092,7 @@ function applySetup() {
   if (d.cols * d.rows > MAX_CELLS) { alert(`That would be ${(d.cols * d.rows).toLocaleString()} cells; the limit is ${MAX_CELLS.toLocaleString()}. Use fewer cells per mile or a smaller area.`); return; }
   const sameGrid = s.type === S.gridType && s.cpm === S.cellsPerMile;
   const edgeCount = Object.keys(S.edges).length;
-  if (!sameGrid && edgeCount && !confirm(`Changing the grid type or cells per mile removes the ${edgeCount} river/cliff segment(s) drawn on cell borders. (Painted terrain, roads and in-cell rivers/cliffs are re-fitted to the new grid.) Continue?`)) return;
+  if (!sameGrid && edgeCount && !confirm(`Changing the grid type or cells per mile removes the ${edgeCount} river, cliff, wall and gate segment(s) drawn on cell borders. (Terrain, roads, in-cell rivers/cliffs, sites and labels are re-fitted to the new grid.) Continue?`)) return;
   const before = snapshot();
   const oldG = G, oldCpm = S.cellsPerMile, oldCells = S.cells;
   const newG = makeGeom(s.type, d.cols, d.rows), cells = {};
@@ -803,7 +1120,7 @@ function applySetup() {
     // as a straight walk through the new grid.
     for (const k of Object.keys(cells)) {
       const n = cells[k];
-      delete n.road; delete n.river; delete n.cliff;
+      delete n.road; delete n.river; delete n.cliff; delete n.site;
       if (!Object.keys(n).length) delete cells[k];
     }
     const sc = s.cpm / oldCpm;
@@ -815,7 +1132,7 @@ function applySetup() {
     };
     for (const [k, cell] of Object.entries(oldCells)) {
       const [oc, or] = parseKey(k), [nc, nr] = newAt(oc, or);
-      for (const prop of ['road', 'river', 'cliff']) if (cell[prop]) put(nc, nr, prop, cell[prop]);
+      for (const prop of ['road', 'river', 'cliff', 'site']) if (cell[prop]) put(nc, nr, prop, cell[prop]);
     }
     const retrace = (prop, out) => {
       for (const lk of Object.keys(S[LINK_SETS[prop]])) {
@@ -853,7 +1170,23 @@ function applySetup() {
       if (newG.inB(...a) || newG.inB(...b)) edges[k] = e;
     }
   }
-  Object.assign(S, { gridType: s.type, widthMiles: s.w, heightMiles: s.h, cellsPerMile: s.cpm, cols: d.cols, rows: d.rows, cells, edges, roadLinks, riverLinks });
+  // Labels: attached ones move to the new cell under their old cell's center; floating ones keep their ground position.
+  const k2 = s.cpm / oldCpm;
+  const labels = S.labels.map(L => {
+    const n = Object.assign({}, L);
+    if (L.cell) {
+      if (sameGrid) { if (!newG.inB(...parseKey(L.cell))) return null; }
+      else {
+        const [x, y] = oldG.center(...parseKey(L.cell)), c = newG.pick(x * k2, y * k2);
+        if (!newG.inB(...c)) return null;
+        n.cell = key(...c);
+      }
+    } else if (!sameGrid) { n.x = L.x * k2; n.y = L.y * k2; }
+    return n;
+  }).filter(Boolean);
+  const lost = S.labels.length - labels.length;
+  Object.assign(S, { gridType: s.type, widthMiles: s.w, heightMiles: s.h, cellsPerMile: s.cpm, cols: d.cols, rows: d.rows, cells, edges, roadLinks, riverLinks, labels });
+  if (lost) alert(`${lost} label(s) were outside the new map area and were removed. Undo brings them back.`);
   pushUndo(before);
   renderAll();
   zoomFit();
@@ -879,6 +1212,10 @@ function featureSwatch(kind, ro) {
   if (kind === 'highway' || kind === 'trail') return roadMark(0, 0, ends, kind);
   if (kind === 'river') return riverMark(0, 0, ends);
   if (kind === 'cliff') return cliffMark(-0.36, -0.04, 0.36, -0.04, 0, 1);
+  if (kind === 'stockade') return stockadeMark([-0.5, 0], [0.5, 0]);
+  if (kind === 'wall') return wallMark([-0.5, 0], [0.5, 0]);
+  if (kind === 'gate') return wallMark([-0.5, 0], [0.5, 0]) + gateMark([-0.5, 0], [0.5, 0]);
+  if (SMAP[kind]) return `<g ${iconGroupAttrs(ro)}>${siteMark(kind, 0, 0, 0.78, ro.lw * 0.8)}</g>`;
   return '';
 }
 function buildSidebar() {
@@ -886,6 +1223,12 @@ function buildSidebar() {
     `<button data-terrain="${t.id}" aria-pressed="false">${swatchSVG(t.id, S.gridType)}<span class="name">${t.name}</span><span class="key">${i + 1}</span></button>`).join('');
   $('#road-palette').innerHTML = ROADS.map(r =>
     `<button data-road="${r.id}" aria-pressed="false">${swatchSVG(r.id === 'none' ? 'blank' : r.id, S.gridType)}<span class="name">${r.name}</span></button>`).join('');
+  const siteBtn = x => `<button data-site="${x.id}" aria-pressed="false" title="${x.pop ? 'Population ' + x.pop : ''}">${swatchSVG(x.id, S.gridType)}<span class="name">${x.name}</span></button>`;
+  $('#settlement-palette').innerHTML = SITES.filter(x => x.group === 'settlement').map(siteBtn).join('');
+  $('#site-palette').innerHTML = SITES.filter(x => x.group === 'site').map(siteBtn).join('') +
+    `<button data-site="none" aria-pressed="false">${swatchSVG('blank', S.gridType)}<span class="name">Remove site</span></button>`;
+  $('#fort-palette').innerHTML = FORTS.map(x =>
+    `<button data-fort="${x.id}" aria-pressed="false">${swatchSVG(x.id, S.gridType)}<span class="name">${x.name}</span></button>`).join('');
   document.querySelectorAll('[data-view]').forEach(cb => { cb.checked = !!S.view[cb.dataset.view]; });
   $('#movement-table').innerHTML = movementTableHTML('mv', 'width="22" height="22"');
   refreshToolUI();
@@ -900,6 +1243,13 @@ function refreshToolUI() {
   document.querySelectorAll('[data-terrain]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.terrain === ui.terrain && (ui.tool === 'terrain' || ui.tool === 'fill'))));
   document.querySelectorAll('[data-road]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.road === ui.road && ui.tool === 'road')));
   document.querySelectorAll('[data-brush]').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.brush === ui.brush)));
+  document.querySelectorAll('[data-site]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.site === ui.site && ui.tool === 'site')));
+  document.querySelectorAll('[data-fort]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.fort === ui.fort && ui.tool === 'fort')));
+  document.querySelectorAll('[data-fortmode]').forEach(b => {
+    b.setAttribute('aria-pressed', String(b.dataset.fortmode === ui.fortMode));
+    b.disabled = ui.fort === 'gate' && b.dataset.fortmode === 'cell';
+  });
+  svg.classList.toggle('tool-label', ui.tool === 'label');
   $('#brush-row').style.visibility = BRUSH_TOOLS.has(ui.tool) ? 'visible' : 'hidden';
   $('#tool-hint').textContent = TOOL_HINTS[ui.tool];
   if (layers.hover) layers.hover.innerHTML = '';
@@ -907,12 +1257,28 @@ function refreshToolUI() {
 function setTool(t) { ui.tool = t; refreshToolUI(); }
 
 // ---------------------------------------------------------------- printing
-const HEAD_H = 0.45, LEG_IW = 1.06, LEG_RH = 0.4;
-const LEGEND_ITEMS = () => [
-  ...TERRAINS.map(t => ({ kind: t.id, label: t.name })),
-  { kind: 'highway', label: 'Highway' }, { kind: 'trail', label: 'Road / trail' },
-  { kind: 'river', label: 'River' }, { kind: 'cliff', label: 'Cliff' },
-];
+const HEAD_H = 0.45, LEG_IW = 1.25, LEG_RH = 0.4;
+const FEATURE_LEGEND = [['highway', 'Highway'], ['trail', 'Road / trail'], ['river', 'River'], ['cliff', 'Cliff'],
+  ['stockade', 'Stockade'], ['wall', 'Stone wall'], ['gate', 'Gate']];
+// Only symbols that actually appear on the map go in the key (all terrains if the map is empty).
+function legendItems() {
+  const used = new Set();
+  for (const cell of Object.values(S.cells)) {
+    if (cell.t) used.add(cell.t);
+    if (cell.road) used.add(cell.road);
+    if (cell.river) used.add('river');
+    if (cell.cliff) used.add('cliff');
+    if (cell.site) used.add(cell.site);
+  }
+  for (const e of Object.values(S.edges)) for (const p of ['river', 'cliff', 'stockade', 'wall', 'gate']) if (e[p]) used.add(p);
+  const items = [
+    ...TERRAINS.filter(t => used.has(t.id)).map(t => ({ kind: t.id, label: t.name })),
+    ...FEATURE_LEGEND.filter(([k]) => used.has(k)).map(([kind, label]) => ({ kind, label })),
+    ...SITES.filter(x => used.has(x.id)).map(x => ({ kind: x.id, label: x.name })),
+  ];
+  return items.length ? items : TERRAINS.map(t => ({ kind: t.id, label: t.name }));
+}
+const LEGEND_ITEMS = legendItems;
 function legendHeight(width, z = 1) {
   const per = Math.max(1, Math.floor(width / (LEG_IW * z)));
   return Math.ceil(LEGEND_ITEMS().length / per) * LEG_RH * z + 0.04;
@@ -958,7 +1324,7 @@ function printLayout() {
   return evalO(P.orientation === 'landscape' ? 'landscape' : 'portrait');
 }
 function printRO(L) {
-  return Object.assign({}, S.view, { lw: clamp(0.011 / L.cellIn, 0.008, 0.05), colors: !!S.print.color });
+  return Object.assign({}, S.view, { lw: clamp(0.011 / L.cellIn, 0.008, 0.05), colors: !!S.print.color, labelMin: (10 / 72) / L.cellIn });
 }
 function scaleBarSVG(L) {
   const ipm = S.cellsPerMile * L.cellIn;        // inches per mile on paper
@@ -983,7 +1349,9 @@ function pageMapSVG(L, ix, iy) {
 }
 function buildPages() {
   const L = printLayout(), ro = printRO(L), pages = [];
-  const total = L.pages + (S.print.refPage ? 1 : 0);
+  const sites = S.print.siteList ? siteEntries() : [];
+  const SITES_PER_PAGE = 76, sitePages = Math.ceil(sites.length / SITES_PER_PAGE);
+  const total = L.pages + (S.print.refPage ? 1 : 0) + sitePages;
   const legend = L.legH ? `<div class="pp-legend">${legendSVG(L.cw, ro)}</div>` : '';
   const tiled = L.pages > 1 || S.print.mode === 'size';
   let n = 0;
@@ -1009,23 +1377,50 @@ function buildPages() {
       `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vbx)} ${f(vby)} ${f(vbw)} ${f(vbh)}" style="width:${f(sw)}in;height:${f(sh)}in">${mapContentSVG(ro, vb, false)}</svg></div>` +
       legend + `</section>`);
   }
-  if (S.print.refPage) pages.push(refPageHTML(L, ro, total));
+  if (S.print.refPage) pages.push(refPageHTML(L, ro, pages.length + 1, total));
+  for (let i = 0; i < sitePages; i++) pages.push(siteListHTML(L, sites.slice(i * SITES_PER_PAGE, (i + 1) * SITES_PER_PAGE), i, pages.length + 1, total));
   return { L, pages };
 }
-function refPageHTML(L, ro, total) {
+// Every named place (label) plus any unnamed site, with the cell it is in.
+function siteEntries() {
+  const named = new Set(), out = [];
+  for (const L of S.labels) {
+    const k = labelCell(L), cell = k && S.cells[k];
+    if (k) named.add(k);
+    out.push({ name: L.text, coord: k ? coordLabel(...parseKey(k)) : '—', type: cell && cell.site ? SMAP[cell.site].name : '' });
+  }
+  for (const [k, cell] of Object.entries(S.cells)) {
+    if (cell.site && SMAP[cell.site] && !named.has(k)) out.push({ name: `(unnamed ${SMAP[cell.site].name.toLowerCase()})`, coord: coordLabel(...parseKey(k)), type: SMAP[cell.site].name });
+  }
+  // Named places first (alphabetical), then unnamed sites.
+  return out.sort((a, b) => (a.name[0] === '(') - (b.name[0] === '(') || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+}
+function siteListHTML(L, rows, idx, pageNo, total) {
+  return `<section class="print-page ref-page" style="width:${f(L.cw)}in;height:${f(L.ch)}in">` +
+    `<h1>${esc(S.title)} — places${idx ? ' (continued)' : ''}</h1>` +
+    `<p style="margin:0 0 .08in;font-size:10.5pt">Cell numbers are column.row, counted from the top-left of the map${S.view.coords ? '' : ' (turn on “Cell numbers” under Display to print them on the map)'}.</p>` +
+    `<ol class="site-list">${rows.map(r => `<li><span class="sl-coord">${esc(r.coord)}</span> <b>${esc(r.name)}</b>${r.type ? ` <span class="sl-type">· ${esc(r.type)}</span>` : ''}</li>`).join('')}</ol>` +
+    `<div style="margin-top:auto;font-size:9pt;text-align:right">Page ${pageNo} of ${total}</div></section>`;
+}
+function refPageHTML(L, ro, pageNo, total) {
+  const items = legendItems().length, z = items <= 16 ? 1.45 : items <= 26 ? 1.2 : 1;
+  const settlements = SITES.filter(x => x.pop && Object.values(S.cells).some(c => c.site === x.id));
   return `<section class="print-page ref-page" style="width:${f(L.cw)}in;height:${f(L.ch)}in">` +
     `<h1>${esc(S.title)} — key</h1>` +
     `<div>${scaleText()}. Map covers ${fmtNum(G.width / S.cellsPerMile)} × ${fmtNum(G.height / S.cellsPerMile)} miles (${S.cols} × ${S.rows} ${cellWord(true)}).</div>` +
-    `<h2>Map symbols</h2>${legendSVG(L.cw, Object.assign({}, ro, { labels: true, icons: true }), 1.45)}` +
+    `<h2>Map symbols</h2>${legendSVG(L.cw, Object.assign({}, ro, { labels: true, icons: true }), z)}` +
     `<h2>Reading the map</h2><ul>` +
     `<li><b>Highway:</b> solid double line. <b>Road / trail:</b> dashed line. Cells with neither are <b>trackless</b>.</li>` +
     `<li><b>River:</b> wavy line, through cells or along cell borders.</li>` +
     `<li><b>Cliff:</b> heavy line with teeth; the teeth point toward the <b>lower</b> ground.</li>` +
+    `<li><b>Stockade:</b> thin line crossed by posts. <b>Stone wall:</b> thick double line with square battlements. <b>Gate:</b> gap with a heavy post each side.</li>` +
+    `<li>A site or settlement sits on top of the terrain; the small icon in the corner of the cell is its terrain.</li>` +
+    (settlements.length ? `<li><b>Settlement sizes (DMG):</b> ${settlements.map(x => `${x.name} ${x.pop}`).join('; ')}.</li>` : '') +
     (S.view.coords ? `<li><b>Cell numbers</b> are column.row, counted from the top-left.</li>` : '') +
-    `</ul><h2>Overland movement (PHB Table 9–5)</h2>` +
+    `</ul><h2>Overland movement (SRD: Terrain and Overland Movement)</h2>` +
     `<p style="margin:0 0 .06in;font-size:11pt">Multiply the party's normal overland speed by the factor for the terrain and route.</p>` +
     movementTableHTML('', '') +
-    `<div style="margin-top:auto;font-size:9pt;text-align:right">Page ${total} of ${total}</div></section>`;
+    `<div style="margin-top:auto;font-size:9pt;text-align:right">Page ${pageNo} of ${total}</div></section>`;
 }
 
 function readPrintInputs() {
@@ -1036,6 +1431,7 @@ function readPrintInputs() {
   P.margin = parseFloat($('#p-margin').value) || 0.5;
   P.legend = $('#p-legend').value;
   P.refPage = $('#p-ref').checked;
+  P.siteList = $('#p-sites').checked;
   P.color = $('#p-color').checked;
   $('#p-cell').disabled = P.mode !== 'size';
   scheduleSave();
@@ -1049,6 +1445,7 @@ function syncPrintInputs() {
   $('#p-margin').value = P.margin;
   $('#p-legend').value = P.legend;
   $('#p-ref').checked = P.refPage;
+  $('#p-sites').checked = P.siteList;
   $('#p-color').checked = P.color;
 }
 let previewTimer = null;
@@ -1058,7 +1455,7 @@ function updatePrintPreview() {
     const { L, pages } = buildPages();
     const mapPages = L.pages, word = cellWord(true);
     $('#p-summary').innerHTML =
-      `${mapPages} map page${mapPages > 1 ? 's' : ''}${S.print.refPage ? ' + 1 key page' : ''}, ${L.o}.<br>` +
+      `${mapPages} map page${mapPages > 1 ? 's' : ''}${S.print.refPage ? ' + 1 key page' : ''}${pages.length - mapPages - (S.print.refPage ? 1 : 0) > 0 ? ' + place list' : ''}, ${L.o}.<br>` +
       `${word[0].toUpperCase() + word.slice(1)} print <b>${L.cellIn.toFixed(2)} in</b> across; 1 mile = ${(L.cellIn * S.cellsPerMile).toFixed(2)} in.` +
       (L.pages > 1 ? `<br>Pages are laid out ${L.px} across × ${L.py} down; trim and tape edge to edge.` : '') +
       (L.cellIn < 0.3 ? `<br>⚠ Cells are very small at this size. Consider fixed cell size with several pages.` : '');
@@ -1116,7 +1513,7 @@ function openFile(file) {
 function newMap() {
   if (!confirm('Start a new, empty map? (You can undo this.) The size and scale settings are kept.')) return;
   const before = snapshot();
-  S.cells = {}; S.edges = {}; S.roadLinks = {}; S.riverLinks = {}; S.title = 'Untitled overland map';
+  S.cells = {}; S.edges = {}; S.roadLinks = {}; S.riverLinks = {}; S.labels = []; S.title = 'Untitled overland map';
   pushUndo(before);
   renderAll();
   scheduleSave();
@@ -1152,6 +1549,30 @@ function wire() {
     ui.tool = 'road';
     refreshToolUI();
   });
+  $('#sites-section').addEventListener('click', e => {
+    const b = e.target.closest('[data-site]');
+    if (!b) return;
+    ui.site = b.dataset.site;
+    ui.tool = 'site';
+    refreshToolUI();
+  });
+  $('#ask-name').checked = ui.askName;
+  $('#ask-name').addEventListener('change', e => { ui.askName = e.target.checked; });
+  $('#fort-section').addEventListener('click', e => {
+    const b = e.target.closest('[data-fort]'), m = e.target.closest('[data-fortmode]');
+    if (b) { ui.fort = b.dataset.fort; ui.tool = 'fort'; }
+    else if (m && !m.disabled) { ui.fortMode = m.dataset.fortmode; ui.tool = 'fort'; }
+    else return;
+    refreshToolUI();
+  });
+  const ld = $('#label-dialog');
+  ld.querySelector('form').addEventListener('submit', e => {
+    e.preventDefault();
+    const action = (e.submitter && e.submitter.value) || 'save';
+    ld.close();
+    closeLabelDialog(action);
+  });
+  ld.addEventListener('cancel', () => { labelEdit = null; });
   document.querySelectorAll('[data-view]').forEach(cb => {
     cb.addEventListener('change', () => { S.view[cb.dataset.view] = cb.checked; renderAll(); scheduleSave(); });
   });
@@ -1183,7 +1604,7 @@ function wire() {
   $('#p-go').addEventListener('click', e => { e.preventDefault(); doPrint(); });
 
   document.addEventListener('keydown', e => {
-    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || pd.open;
+    const typing = /^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName) || !!document.querySelector('dialog[open]');
     if ((e.ctrlKey || e.metaKey) && !typing) {
       const k = e.key.toLowerCase();
       if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); return; }
@@ -1195,7 +1616,7 @@ function wire() {
     if (typing || e.altKey) return;
     if (e.key === ' ') { e.preventDefault(); if (!spaceDown) { spaceDown = true; $('#scroller').classList.add('panning'); } return; }
     if (/^[1-9]$/.test(e.key)) { ui.terrain = TERRAINS[+e.key - 1].id; if (ui.tool !== 'fill') ui.tool = 'terrain'; refreshToolUI(); return; }
-    const map = { b: 'terrain', f: 'fill', r: 'road', e: 'erase' };
+    const map = { b: 'terrain', f: 'fill', r: 'road', e: 'erase', s: 'site', w: 'fort', l: 'label' };
     if (map[e.key.toLowerCase()]) { setTool(map[e.key.toLowerCase()]); return; }
     if (e.key === '+' || e.key === '=') setZoom(ui.zoom * 1.25);
     if (e.key === '-') setZoom(ui.zoom / 1.25);

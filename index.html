@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overland Terrain Map</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<!-- Shared terrain icon symbols (filled in by app.js). Kept in a 0x0 SVG, not display:none, so <use> renders. -->
+<svg id="defs-svg" width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs id="symbol-defs"></defs></svg>
+
+<div id="app">
+  <header class="topbar">
+    <label class="title-field">
+      <span class="sr-only">Map title</span>
+      <input id="map-title" type="text" maxlength="80" aria-label="Map title">
+    </label>
+    <div class="top-actions">
+      <button id="btn-undo" title="Undo (Ctrl+Z)">↶ Undo</button>
+      <button id="btn-redo" title="Redo (Ctrl+Y)">↷ Redo</button>
+      <span class="divider" aria-hidden="true"></span>
+      <button id="btn-new">New</button>
+      <button id="btn-open">Open file…</button>
+      <button id="btn-save">Save file</button>
+      <button id="btn-print" class="primary">🖨 Print…</button>
+      <input type="file" id="file-input" accept=".json,application/json" hidden>
+    </div>
+  </header>
+
+  <aside class="sidebar" aria-label="Tools and settings">
+    <section>
+      <h2>Tool</h2>
+      <div class="tool-grid" id="tool-buttons" role="group" aria-label="Tool">
+        <button data-tool="terrain">Terrain brush <kbd>B</kbd></button>
+        <button data-tool="fill">Fill area <kbd>F</kbd></button>
+        <button data-tool="road">Road / highway <kbd>R</kbd></button>
+        <button data-tool="erase">Eraser <kbd>E</kbd></button>
+        <button data-tool="river-cell">River in cell</button>
+        <button data-tool="river-edge">River on border</button>
+        <button data-tool="cliff-cell">Cliff in cell</button>
+        <button data-tool="cliff-edge">Cliff on border</button>
+      </div>
+      <p class="tool-hint" id="tool-hint"></p>
+      <div id="brush-row" class="seg" role="group" aria-label="Brush size">
+        <span class="seg-label">Brush</span>
+        <button data-brush="0">1 cell</button>
+        <button data-brush="1">Radius 1</button>
+        <button data-brush="2">Radius 2</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Terrain</h2>
+      <div class="palette" id="terrain-palette" role="group" aria-label="Terrain"></div>
+    </section>
+
+    <section>
+      <h2>Roads</h2>
+      <div class="palette" id="road-palette" role="group" aria-label="Road type"></div>
+    </section>
+
+    <section>
+      <h2>Display</h2>
+      <label class="check"><input type="checkbox" data-view="colors"> Color fill</label>
+      <label class="check"><input type="checkbox" data-view="icons"> Terrain icons</label>
+      <label class="check"><input type="checkbox" data-view="labels"> Text labels (Fo, Hi, Mt…)</label>
+      <label class="check"><input type="checkbox" data-view="coords"> Cell numbers</label>
+      <label class="check"><input type="checkbox" data-view="mileLines"> Heavy line every mile (squares)</label>
+    </section>
+
+    <section>
+      <h2>Map size &amp; scale</h2>
+      <fieldset class="seg" id="grid-type">
+        <legend class="seg-label">Grid</legend>
+        <label><input type="radio" name="gridType" value="hex"> Hexes</label>
+        <label><input type="radio" name="gridType" value="square"> Squares</label>
+      </fieldset>
+      <div class="field-row">
+        <label>Width (miles)<input id="set-width" type="number" min="0.5" max="200" step="0.5"></label>
+        <label>Height (miles)<input id="set-height" type="number" min="0.5" max="200" step="0.5"></label>
+      </div>
+      <label class="field">Cells per mile
+        <input id="set-cpm" type="number" min="0.1" max="20" step="0.25" list="cpm-presets">
+        <datalist id="cpm-presets"><option value="0.5"><option value="1"><option value="2"><option value="3"><option value="4"><option value="5"><option value="10"></datalist>
+      </label>
+      <p class="setup-preview" id="setup-preview"></p>
+      <button id="btn-apply" class="wide">Apply size &amp; scale</button>
+      <p class="fine">Painted terrain stays where it is on the ground and is re-fitted to the new grid. Rivers and cliffs drawn on cell borders are kept only if the grid type and cells-per-mile stay the same.</p>
+    </section>
+
+    <section>
+      <details>
+        <summary>Overland movement (PHB Table 9–5)</summary>
+        <div id="movement-table"></div>
+      </details>
+      <details>
+        <summary>Mouse &amp; keyboard help</summary>
+        <ul class="help">
+          <li><b>Click or drag</b> to paint with the current tool.</li>
+          <li><b>Right-click / right-drag</b> removes what the current tool paints.</li>
+          <li><b>Roads and rivers in cells</b> follow the path you drag, cell to cell. Drag past the map edge to have them run off the map.</li>
+          <li>Cliffs, and rivers on borders: clicking one that already exists removes it.</li>
+          <li><b>Cliff on border:</b> the teeth point to the low side. Draw with the pointer on the low side, or <b>Shift+click</b> a cliff to flip it.</li>
+          <li><b>1–9</b> pick a terrain. <b>Ctrl+Z</b> undo, <b>Ctrl+Y</b> redo.</li>
+          <li><b>Ctrl+scroll</b> or <b>+ / −</b> to zoom. <b>Space+drag</b> or middle-drag to pan.</li>
+          <li>Your map saves itself in this browser. Use <b>Save file</b> to keep a copy or move it to another computer.</li>
+        </ul>
+      </details>
+    </section>
+  </aside>
+
+  <main class="canvas-wrap">
+    <div class="canvas-toolbar">
+      <button id="zoom-out" aria-label="Zoom out">−</button>
+      <span id="zoom-label" aria-live="polite">100%</span>
+      <button id="zoom-in" aria-label="Zoom in">+</button>
+      <button id="zoom-fit">Fit</button>
+      <span id="map-info" class="map-info"></span>
+    </div>
+    <div id="scroller">
+      <svg id="map" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Terrain map editor"></svg>
+    </div>
+    <div id="status" class="status" aria-live="polite">&nbsp;</div>
+  </main>
+</div>
+
+<dialog id="print-dialog" aria-labelledby="print-title">
+  <div class="pd-layout">
+    <form class="pd-controls" method="dialog">
+      <h2 id="print-title">Print on 8.5 × 11 in paper</h2>
+      <fieldset class="seg">
+        <legend class="seg-label">Size</legend>
+        <label><input type="radio" name="pmode" value="fit"> Fit whole map on one page</label>
+        <label><input type="radio" name="pmode" value="size"> Fixed cell size (may use several pages)</label>
+      </fieldset>
+      <label class="field">Cell size, inches across
+        <input id="p-cell" type="number" min="0.2" max="4" step="0.05">
+      </label>
+      <label class="field">Orientation
+        <select id="p-orient">
+          <option value="auto">Automatic (best fit)</option>
+          <option value="portrait">Portrait</option>
+          <option value="landscape">Landscape</option>
+        </select>
+      </label>
+      <label class="field">Page margin, inches
+        <input id="p-margin" type="number" min="0.2" max="1.5" step="0.05">
+      </label>
+      <label class="field">Key (legend)
+        <select id="p-legend">
+          <option value="every">On every page</option>
+          <option value="none">None</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="p-ref"> Add a page with the key and movement table</label>
+      <label class="check"><input type="checkbox" id="p-color"> Print in color (off = black &amp; white)</label>
+      <p id="p-summary" class="p-summary" aria-live="polite"></p>
+      <p class="fine">In the browser's print window choose <b>Letter</b> paper and <b>100% / Default</b> scale so the cell size comes out exactly right.</p>
+      <div class="pd-buttons">
+        <button value="cancel">Close</button>
+        <button id="p-go" class="primary" value="print">🖨 Print</button>
+      </div>
+    </form>
+    <div class="pd-preview" id="p-preview" aria-label="Print preview"></div>
+  </div>
+</dialog>
+
+<div id="print-root"></div>
+<style id="page-style"></style>
+<script src="app.js"></script>
+</body>
+</html>

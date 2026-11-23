@@ -21,6 +21,9 @@ const TERRAINS = [
   { id: 'plains',    name: 'Plains',    abbr: 'Pl', color: '#e9f2b6', mv: [1, 1, 3/4] },
   { id: 'swamp',     name: 'Swamp',     abbr: 'Sw', color: '#9cc6c0', mv: [1, 3/4, 1/2] },
   { id: 'tundra',    name: 'Tundra',    abbr: 'Tu', color: '#e1ecf7', mv: [1, 3/4, 3/4] },
+  // Not in the SRD table: house-rule multipliers (farmland like plains; urban trackless = cutting through buildings and alleys).
+  { id: 'farms',     name: 'Farms',     abbr: 'Fa', color: '#f3c99e', mv: [1, 1, 3/4], houseRule: true, key: '0' },
+  { id: 'urban',     name: 'Urban',     abbr: 'Ur', color: '#d3d3dc', mv: [1, 1, 1/2], houseRule: true, key: 'U' },
 ];
 const TMAP = Object.fromEntries(TERRAINS.map(t => [t.id, t]));
 const ROADS = [
@@ -63,9 +66,9 @@ const LABEL_FS = { s: 0.2, m: 0.28, l: 0.4 };
 const TOOL_HINTS = {
   terrain: 'Click or drag to paint the selected terrain. Right-drag clears terrain.',
   fill: 'Click to fill a connected area of the same terrain (an empty map fills completely).',
-  road: 'Drag from cell to cell to lay a road; it follows your path. Click a road cell to change its type. Right-drag (or pick Trackless) removes road.',
+  road: 'Drag from cell to cell to lay a road; it follows your path, and its ends join any road next to them. Click a cell to add or connect it, or to change a road\'s type. Right-drag (or pick Trackless) removes road.',
   erase: 'Click or drag to clear everything in a cell (terrain, road, river, cliff).',
-  'river-cell': 'Drag from cell to cell to run a river through them; drag off the map edge to have it flow off. Right-drag removes.',
+  'river-cell': 'Drag from cell to cell to run a river through them; its ends join any river next to them. Click a cell to add or connect it. Drag off the map edge to flow off. Right-drag removes.',
   'river-edge': 'Drag along cell borders to draw a river on the borders.',
   'cliff-cell': 'Click a cell to mark that it contains a cliff.',
   'cliff-edge': 'Drag along cell borders with the pointer on the LOW side. Shift+click a cliff to flip it.',
@@ -160,6 +163,15 @@ const SYMBOLS = {
   tundra:
     `<path d="${flake(-3.5, -3, 5)}${flake(5, 2.5, 3)}"/>` +
     `<path d="M-9.5,8h5M-2,8h4M4.5,8h5"/>`,
+  // Patchwork of three fields, furrows running different ways.
+  farms:
+    `<path d="M-9,-9H-1V-1H-9ZM1,-9H9V-1H1ZM-9,1H9V9H-9Z" ${LIGHT}/>` +
+    `<path d="M-7,-9V-1M-5,-9V-1M-3,-9V-1M1,-7H9M1,-5H9M1,-3H9M-7,9L-3,1M-3,9L1,1M1,9L5,1M5,9L9,1"/>`,
+  // City blocks divided by streets: two solid, two outlined.
+  urban:
+    `<path d="M-9,-9H-1.5V-1.5H-9ZM1.5,1.5H9V9H1.5Z" fill="currentColor"/>` +
+    `<path d="M1.5,-9H9V-1.5H1.5ZM-9,1.5H-1.5V9H-9Z" ${LIGHT}/>` +
+    `<path d="M3.5,-7H7M3.5,-3.5H7M-7,3.5H-3.5M-7,7H-3.5"/>`,
 };
 
 // ---- settlement & site icons (same -10..10 box)
@@ -802,8 +814,31 @@ function linkPaint(c, r) {
       if (isNb(pc, pr, c, r) && !links[lk]) { links[lk] = true; dirty.add(k); dirty.add(prev); }
     }
     stroke.prevCell = k;
+    if (inside) { stroke.linkCells.add(k); if (!stroke.firstLink) stroke.firstLink = k; }
   }
   if (dirty.size) { stroke.changed = true; redrawCells(withNeighbors(dirty)); }
+}
+const keyNb = (a, b) => isNb(...parseKey(a), ...parseKey(b));
+/* Join a road/river cell to neighboring road/river cells it isn't linked to yet. A link is skipped
+ * if it would close a triangle (the neighbor is already linked to another neighbor this cell
+ * links to), so a road drawn beside or across another doesn't turn into a ladder. */
+function autoJoin(k, prop, exclude) {
+  const cell = S.cells[k];
+  if (!cell || !cell[prop]) return [];
+  const links = S[LINK_SETS[prop]], [c, r] = parseKey(k), linked = [], cands = [];
+  for (let i = 0; i < G.n; i++) {
+    const [nc, nr] = G.nb(c, r, i), nk = key(nc, nr);
+    if (links[edgeKey(c, r, nc, nr)]) linked.push(nk);
+    else if (G.inB(nc, nr) && S.cells[nk] && S.cells[nk][prop] && !exclude.has(nk)) cands.push(nk);
+  }
+  const joined = [];
+  for (const nk of cands) {
+    if (linked.some(m => keyNb(m, nk) && links[edgeKey(...parseKey(m), ...parseKey(nk))])) continue;
+    links[edgeKey(c, r, ...parseKey(nk))] = true;
+    linked.push(nk);
+    joined.push(nk);
+  }
+  return joined;
 }
 
 // Which border feature the current tool draws, or null if it works on whole cells.
@@ -904,7 +939,8 @@ function onPointerDown(e) {
   const [x, y] = evtPt(e);
   if (ui.tool === 'label') { labelPointerDown(e, x, y); return; }
   stroke = { before: snapshot(), erase: e.button === 2, shift: e.shiftKey, mode: null, changed: false,
-             lastCell: null, lastEdge: null, lastPt: [x, y], pointerId: e.pointerId, moved: false };
+             lastCell: null, lastEdge: null, lastPt: [x, y], pointerId: e.pointerId, moved: false,
+             linkCells: new Set(), firstLink: null };
   if (ui.tool === 'fill') {
     const [c, r] = G.pick(x, y);
     stroke.changed = floodFill(c, r, stroke.erase);
@@ -927,6 +963,18 @@ function onPointerMove(e) {
 }
 function endStroke() {
   if (!stroke) return;
+  // Roads and in-cell rivers: the two ends of the stroke connect to whatever road/river is next to them.
+  const lprop = LINK_TOOLS[ui.tool];
+  if (lprop && !stroke.erase && !(lprop === 'road' && ui.road === 'none') && stroke.firstLink) {
+    const dirty = new Set();
+    for (const end of new Set([stroke.firstLink, stroke.prevCell])) {
+      if (!end || !G.inB(...parseKey(end))) continue;
+      const exclude = new Set(stroke.linkCells);
+      exclude.delete(end);
+      for (const nk of autoJoin(end, lprop, exclude)) { dirty.add(nk); dirty.add(end); }
+    }
+    if (dirty.size) { stroke.changed = true; redrawCells(withNeighbors(dirty)); }
+  }
   if (stroke.changed) { pushUndo(stroke.before); scheduleSave(); }
   // Placing a single site by click: offer to name it (an attached label under the cell).
   if (ui.tool === 'site' && ui.askName && stroke.changed && !stroke.erase && !stroke.moved && ui.site !== 'none' && stroke.lastCell) {
@@ -1220,7 +1268,7 @@ function featureSwatch(kind, ro) {
 }
 function buildSidebar() {
   $('#terrain-palette').innerHTML = TERRAINS.map((t, i) =>
-    `<button data-terrain="${t.id}" aria-pressed="false">${swatchSVG(t.id, S.gridType)}<span class="name">${t.name}</span><span class="key">${i + 1}</span></button>`).join('');
+    `<button data-terrain="${t.id}" aria-pressed="false">${swatchSVG(t.id, S.gridType)}<span class="name">${t.name}</span><span class="key">${t.key || i + 1}</span></button>`).join('');
   $('#road-palette').innerHTML = ROADS.map(r =>
     `<button data-road="${r.id}" aria-pressed="false">${swatchSVG(r.id === 'none' ? 'blank' : r.id, S.gridType)}<span class="name">${r.name}</span></button>`).join('');
   const siteBtn = x => `<button data-site="${x.id}" aria-pressed="false" title="${x.pop ? 'Population ' + x.pop : ''}">${swatchSVG(x.id, S.gridType)}<span class="name">${x.name}</span></button>`;
@@ -1235,8 +1283,8 @@ function buildSidebar() {
 }
 function movementTableHTML(cls, swAttr) {
   return `<table class="${cls}"><thead><tr><th>Terrain</th><th>Highway</th><th>Road or trail</th><th>Trackless</th></tr></thead><tbody>` +
-    TERRAINS.map(t => `<tr><td>${swatchSVG(t.id, S.gridType, swAttr)}${t.name}</td>${t.mv.map(v => `<td>${frac(v)}</td>`).join('')}</tr>`).join('') +
-    `</tbody></table>`;
+    TERRAINS.map(t => `<tr><td>${swatchSVG(t.id, S.gridType, swAttr)}${t.name}${t.houseRule ? ' *' : ''}</td>${t.mv.map(v => `<td>${frac(v)}</td>`).join('')}</tr>`).join('') +
+    `</tbody></table><p class="mv-note">* Not in the SRD table; house-rule values.</p>`;
 }
 function refreshToolUI() {
   document.querySelectorAll('[data-tool]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tool === ui.tool)));
@@ -1615,7 +1663,8 @@ function wire() {
     }
     if (typing || e.altKey) return;
     if (e.key === ' ') { e.preventDefault(); if (!spaceDown) { spaceDown = true; $('#scroller').classList.add('panning'); } return; }
-    if (/^[1-9]$/.test(e.key)) { ui.terrain = TERRAINS[+e.key - 1].id; if (ui.tool !== 'fill') ui.tool = 'terrain'; refreshToolUI(); return; }
+    const tk = /^[1-9]$/.test(e.key) ? TERRAINS[+e.key - 1] : TERRAINS.find(t => t.key && t.key.toLowerCase() === e.key.toLowerCase());
+    if (tk) { ui.terrain = tk.id; if (ui.tool !== 'fill') ui.tool = 'terrain'; refreshToolUI(); return; }
     const map = { b: 'terrain', f: 'fill', r: 'road', e: 'erase', s: 'site', w: 'fort', l: 'label' };
     if (map[e.key.toLowerCase()]) { setTool(map[e.key.toLowerCase()]); return; }
     if (e.key === '+' || e.key === '=') setZoom(ui.zoom * 1.25);

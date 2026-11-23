@@ -7,8 +7,8 @@ A browser-based editor for D&D 3.5e overland terrain maps, made for printing on 
 ## Features
 
 - **Hex or square grid.** Set the map size in miles and the **cells per mile** (for example 1, 2 or 4, or a fraction like 0.5). You can change these later: painted terrain stays where it is on the ground and is re-fitted to the new grid.
-- **Terrain:** Desert, Forest, Hills, Jungle, Moor, Mountains, Plains, Swamp, Tundra. Each one has its **own black-ink icon** so the map reads without relying on color. You can also turn on two-letter text labels (Fo, Hi, Mt…) and turn color off.
-- **Routes:** Highway (solid double line), Road / Trail (dashed line), or Trackless (no line). Roads follow the path you drag from cell to cell.
+- **Terrain:** Desert, Forest, Hills, Jungle, Moor, Mountains, Plains, Swamp, Tundra, plus Farms and Urban (these two use house-rule movement values, since the SRD table doesn't cover them). Each one has its **own black-ink icon** so the map reads without relying on color. You can also turn on two-letter text labels (Fo, Hi, Mt…) and turn color off.
+- **Routes:** Highway (solid double line), Road / Trail (dashed line), or Trackless (no line). Roads follow the path you drag from cell to cell, and join any road next to where they start and end.
 - **Rivers and cliffs** can go *in* a cell or *on a cell border*. A cliff's teeth point toward the lower ground.
 - **Settlements and sites** sit on top of the terrain, so the cell keeps its terrain type and movement rules. The settlements are the 8 DMG community sizes (thorp through metropolis), each with its own icon. The other sites are ruins, tower/keep, castle, temple/shrine, cave/dungeon, bridge, ford, camp, lair and point of interest.
 - **Walls and gates:** stockade (line crossed by posts), stone wall (thick double line with battlements) and gates. They go along cell borders or around a whole cell.
@@ -22,7 +22,7 @@ A browser-based editor for D&D 3.5e overland terrain maps, made for printing on 
 | --- | --- |
 | Paint | Click or drag |
 | Remove what the current tool paints | Right-click / right-drag |
-| Pick terrain | Keys 1–9 |
+| Pick terrain | Keys 1–9, 0 (Farms), U (Urban) |
 | Tools | B brush, F fill, R road, E eraser, S site, W walls, L label |
 | Flip a cliff | Shift+click it (Cliff on border tool) |
 | Undo / redo | Ctrl+Z / Ctrl+Y |

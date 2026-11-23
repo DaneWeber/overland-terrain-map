@@ -138,6 +138,8 @@ summary { cursor: pointer; font-weight: 700; min-height: 32px; padding: 4px 0; }
 table.mv { border-collapse: collapse; width: 100%; font-size: .88rem; margin-top: 6px; }
 table.mv th, table.mv td { border: 1px solid #999; padding: 3px 5px; text-align: center; }
 table.mv th:first-child, table.mv td:first-child { text-align: left; }
+.mv-note { font-size: .8rem; color: var(--muted); margin: 4px 0 0; }
+.ref-page .mv-note { font-size: 9pt; color: #333; margin: .03in 0 0; }
 table.mv td svg { width: 22px; height: 22px; vertical-align: middle; margin-right: 4px; }
 
 /* ---------- canvas ---------- */

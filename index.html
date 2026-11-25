@@ -81,6 +81,12 @@
       </div>
     </section>
 
+    <section id="areas-section">
+      <h2>Areas</h2>
+      <button id="btn-area-new" class="wide" aria-pressed="false">＋ New area: drag on the map</button>
+      <ul id="area-list" class="area-list"></ul>
+    </section>
+
     <section>
       <h2>Display</h2>
       <label class="check"><input type="checkbox" data-view="colors"> Color fill</label>
@@ -88,6 +94,7 @@
       <label class="check"><input type="checkbox" data-view="labels"> Text labels (Fo, Hi, Mt…)</label>
       <label class="check"><input type="checkbox" data-view="coords"> Cell numbers</label>
       <label class="check"><input type="checkbox" data-view="mileLines"> Heavy line every mile (squares)</label>
+      <label class="check"><input type="checkbox" data-view="areaOutlines"> Area outlines (editor only)</label>
     </section>
 
     <section>
@@ -108,6 +115,23 @@
       <p class="setup-preview" id="setup-preview"></p>
       <button id="btn-apply" class="wide">Apply size &amp; scale</button>
       <p class="fine">Painted terrain stays where it is on the ground and is re-fitted to the new grid. Rivers and cliffs drawn on cell borders are kept only if the grid type and cells-per-mile stay the same.</p>
+
+      <h2 class="sub">Add or remove rows &amp; columns</h2>
+      <label class="field grow-n">How many at a time
+        <input id="grow-n" type="number" min="1" max="200" step="1" value="1">
+      </label>
+      <div class="grow-pad" id="grow-pad" role="group" aria-label="Add or remove rows and columns">
+        <div class="gp-side gp-top"><span>Top</span>
+          <button data-grow="top" data-dir="1" aria-label="Add rows at the top">＋</button><button data-grow="top" data-dir="-1" aria-label="Remove rows from the top">−</button></div>
+        <div class="gp-side gp-left"><span>Left</span>
+          <button data-grow="left" data-dir="1" aria-label="Add columns on the left">＋</button><button data-grow="left" data-dir="-1" aria-label="Remove columns from the left">−</button></div>
+        <div class="gp-map" aria-hidden="true">map</div>
+        <div class="gp-side gp-right"><span>Right</span>
+          <button data-grow="right" data-dir="1" aria-label="Add columns on the right">＋</button><button data-grow="right" data-dir="-1" aria-label="Remove columns from the right">−</button></div>
+        <div class="gp-side gp-bottom"><span>Bottom</span>
+          <button data-grow="bottom" data-dir="1" aria-label="Add rows at the bottom">＋</button><button data-grow="bottom" data-dir="-1" aria-label="Remove rows from the bottom">−</button></div>
+      </div>
+      <p class="fine">Everything already drawn stays where it is. Adding on the left or top renumbers the cells.</p>
     </section>
 
     <section>
@@ -127,6 +151,7 @@
           <li><b>Labels:</b> with the Label tool, click to add, drag to move, click to edit, right-click to delete. "Attach to cell" labels sit under their cell and snap from cell to cell.</li>
           <li><b>1–9, 0, U</b> pick a terrain. <b>Ctrl+Z</b> undo, <b>Ctrl+Y</b> redo.</li>
           <li><b>Ctrl+scroll</b> or <b>+ / −</b> to zoom. <b>Space+drag</b> or middle-drag to pan.</li>
+          <li><b>Areas:</b> click <b>New area</b> and drag across the map. <b>Focus</b> shows only that area for editing; <b>Print…</b> prints it alone at its own cell size. Esc cancels.</li>
           <li>Your map saves itself in this browser. Use <b>Save file</b> to keep a copy or move it to another computer.</li>
         </ul>
       </details>
@@ -139,6 +164,7 @@
       <span id="zoom-label" aria-live="polite">100%</span>
       <button id="zoom-in" aria-label="Zoom in">+</button>
       <button id="zoom-fit">Fit</button>
+      <label class="focus-pick">Show <select id="focus-select" aria-label="Show the whole map or one area"></select></label>
       <span id="map-info" class="map-info"></span>
     </div>
     <div id="scroller">
@@ -152,6 +178,10 @@
   <div class="pd-layout">
     <form class="pd-controls" method="dialog">
       <h2 id="print-title">Print on 8.5 × 11 in paper</h2>
+      <label class="field">What to print
+        <select id="p-target"></select>
+      </label>
+      <p class="fine p-target-note">Each area remembers its own print settings.</p>
       <fieldset class="seg">
         <legend class="seg-label">Size</legend>
         <label><input type="radio" name="pmode" value="fit"> Fit whole map on one page</label>
@@ -159,6 +189,17 @@
       </fieldset>
       <label class="field">Cell size, inches across
         <input id="p-cell" type="number" min="0.2" max="4" step="0.05">
+      </label>
+      <div class="seg cell-presets" id="p-cell-presets" role="group" aria-label="Cell size presets">
+        <button type="button" data-cellin="0.75">¾″</button>
+        <button type="button" data-cellin="1">1″</button>
+        <button type="button" data-cellin="1.25">1¼″</button>
+        <button type="button" data-cellin="1.5">1½″</button>
+        <button type="button" data-cellin="2">2″</button>
+      </div>
+      <p class="fine">Hexes are measured flat side to flat side. For miniatures: 1″ fits 25 mm bases, 1½″ fits 32 mm, 2″ fits 50 mm (Large).</p>
+      <label class="field">Overlap between pages, inches
+        <input id="p-overlap" type="number" min="0" max="1" step="0.05">
       </label>
       <label class="field">Orientation
         <select id="p-orient">

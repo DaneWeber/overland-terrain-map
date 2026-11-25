@@ -75,6 +75,7 @@ const TOOL_HINTS = {
   site: 'Click a cell to place the selected settlement or site on top of its terrain. Right-click removes it.',
   fort: 'Drag along cell borders to build, or choose "Around a whole cell". Clicking an existing wall removes it. Gates go on single borders.',
   label: 'Click to add a label. Drag a label to move it, click it to edit, right-click it to delete.',
+  area: 'Drag across the map to mark a rectangle of cells as a new area. Right-click or Esc cancels.',
 };
 const EDGE_TOOLS = { 'river-edge': 'river', 'cliff-edge': 'cliff' };
 const BRUSH_TOOLS = new Set(['terrain', 'erase']);
@@ -249,14 +250,18 @@ function dims(type, w, h, cpm) {
   return { cols, rows };
 }
 
-function makeGeom(type, cols, rows) {
-  const hex = type === 'hex';
+/* origin = how many columns/rows have been added (+) or removed (-) at the left/top since the grid
+ * was laid out. For hexes, origin.r decides which rows are shifted right, so adding a single row at
+ * the top keeps every existing hex where it was. For squares it keeps the heavy mile lines in place. */
+function makeGeom(type, cols, rows, origin) {
+  const hex = type === 'hex', o = origin || { c: 0, r: 0 };
+  const odd = r => ((r + o.r) & 1) === 1;
   const g = {
-    type, cols, rows, n: hex ? 6 : 4,
-    width: hex ? cols + (rows > 1 ? 0.5 : 0) : cols,
+    type, cols, rows, n: hex ? 6 : 4, origin: o,
+    width: hex ? cols + (rows > 1 || odd(0) ? 0.5 : 0) : cols,
     height: hex ? 2 * HS + (rows - 1) * VSTEP : rows,
-    center: hex ? (c, r) => [c + 0.5 + ((r & 1) ? 0.5 : 0), HS + r * VSTEP] : (c, r) => [c + 0.5, r + 0.5],
-    nb: hex ? (c, r, i) => { const d = ((r & 1) ? HEX_ODD : HEX_EVEN)[i]; return [c + d[0], r + d[1]]; }
+    center: hex ? (c, r) => [c + 0.5 + (odd(r) ? 0.5 : 0), HS + r * VSTEP] : (c, r) => [c + 0.5, r + 0.5],
+    nb: hex ? (c, r, i) => { const d = (odd(r) ? HEX_ODD : HEX_EVEN)[i]; return [c + d[0], r + d[1]]; }
             : (c, r, i) => [c + SQ_N[i][0], r + SQ_N[i][1]],
     inB: (c, r) => c >= 0 && r >= 0 && c < cols && r < rows,
   };
@@ -269,7 +274,7 @@ function makeGeom(type, cols, rows) {
     const r0 = Math.round((y - HS) / VSTEP);
     let best = null, bd = Infinity;
     for (let r = r0 - 1; r <= r0 + 1; r++) {
-      const c0 = Math.round(x - 0.5 - ((r & 1) ? 0.5 : 0));
+      const c0 = Math.round(x - 0.5 - (odd(r) ? 0.5 : 0));
       for (let c = c0 - 1; c <= c0 + 1; c++) {
         const [cx, cy] = g.center(c, r), d = (cx - x) ** 2 + (cy - y) ** 2;
         if (d < bd) { bd = d; best = [c, r]; }
@@ -278,7 +283,8 @@ function makeGeom(type, cols, rows) {
     return best;
   } : (x, y) => [Math.floor(x), Math.floor(y)];
   g.dist = hex ? (c1, r1, c2, r2) => {
-    const q1 = c1 - (r1 - (r1 & 1)) / 2, q2 = c2 - (r2 - (r2 & 1)) / 2, dq = q1 - q2, dr = r1 - r2;
+    const p1 = odd(r1) ? 1 : 0, p2 = odd(r2) ? 1 : 0;
+    const q1 = c1 - (r1 - p1) / 2, q2 = c2 - (r2 - p2) / 2, dq = q1 - q2, dr = r1 - r2;
     return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq + dr));
   } : (c1, r1, c2, r2) => Math.max(Math.abs(c1 - c2), Math.abs(r1 - r2));
   return g;
@@ -319,9 +325,15 @@ function defaultState() {
     roadLinks: {},  // "c,r|c,r" -> true: road runs between these two cells (one may be just off the map)
     riverLinks: {}, // same for rivers running through cells
     labels: [],     // { id, text, size: 's'|'m'|'l', cell: "c,r" (attached) | x, y (floating, cell units) }
-    view: { colors: true, icons: true, labels: false, coords: false, mileLines: true },
-    print: { orientation: 'auto', mode: 'fit', cellInches: 1, margin: 0.5, legend: 'every', refPage: true, siteList: true, color: true },
+    origin: { c: 0, r: 0 },  // columns/rows added (+) or removed (-) at the left/top; see makeGeom
+    areas: [],      // { id, name, c0, r0, c1, r1 }: named rectangles of cells to focus on or print alone
+    areaPrint: {},  // area id -> print settings for that area (same shape as print)
+    view: { colors: true, icons: true, labels: false, coords: false, mileLines: true, areaOutlines: true, focus: null },
+    print: defaultPrint(),
   };
+}
+function defaultPrint() {
+  return { orientation: 'auto', mode: 'fit', cellInches: 1, margin: 0.5, overlap: 0, legend: 'every', refPage: true, siteList: true, color: true, target: '' };
 }
 let S, G;
 const ui = { tool: 'terrain', terrain: 'plains', road: 'highway', site: 'village', fort: 'stockade', fortMode: 'edge', askName: true, brush: 0, zoom: 1 };
@@ -337,12 +349,17 @@ function normalizeState(raw) {
   s.labels = Array.isArray(s.labels) ? s.labels : [];
   if (s.gridType !== 'square') s.gridType = 'hex';
   if (!(s.cols > 0 && s.rows > 0)) Object.assign(s, dims(s.gridType, s.widthMiles, s.heightMiles, s.cellsPerMile));
+  const o = s.origin || {};
+  s.origin = { c: Number.isInteger(o.c) ? o.c : 0, r: Number.isInteger(o.r) ? o.r : 0 };
+  s.areas = (Array.isArray(s.areas) ? s.areas : []).filter(a => a && a.id && [a.c0, a.r0, a.c1, a.r1].every(Number.isInteger));
+  s.areaPrint = s.areaPrint && typeof s.areaPrint === 'object' ? s.areaPrint : {};
+  if (!s.areas.some(a => a.id === s.view.focus)) s.view.focus = null;
   return s;
 }
 
 function snapshot() {
-  const { title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels } = S;
-  return JSON.stringify({ title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels });
+  const { title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels, origin, areas } = S;
+  return JSON.stringify({ title, gridType, widthMiles, heightMiles, cellsPerMile, cols, rows, cells, edges, roadLinks, riverLinks, labels, origin, areas });
 }
 function restore(snap) {
   Object.assign(S, JSON.parse(snap));
@@ -580,11 +597,12 @@ function cellFeatSVG(c, r) {
   if (cell.road) out += roadMark(x, y, linkEnds(c, r, 'road'), cell.road);
   return out;
 }
-function edgesSVG(vb) {
+function edgesSVG(vb, area) {
   let rivers = '', cliffs = '', gates = '';
   const st = { line: '', extra: '' }, wl = { line: '', extra: '' };
   const add = (acc, part) => { acc.line += part.line; acc.extra += part.extra; };
   for (const [k, e] of Object.entries(S.edges)) {
+    if (area && !edgeTouchesArea(area, k)) continue;
     const g = edgeGeom(k);
     if (!g) continue;
     if (vb && !inView(vb, (g.a[0] + g.b[0]) / 2, (g.a[1] + g.b[1]) / 2)) continue;
@@ -601,7 +619,9 @@ function edgesSVG(vb) {
 }
 function gridSVG(ro, vb) {
   let d = '';
+  const A = ro.area;
   for (let r = 0; r < S.rows; r++) for (let c = 0; c < S.cols; c++) {
+    if (A && !inArea(A, c, r)) continue;
     if (vb && !inView(vb, ...G.center(c, r))) continue;
     const cs = G.corners(c, r);
     d += 'M' + cs.map(p => f(p[0]) + ',' + f(p[1])).join('L') + 'Z';
@@ -609,9 +629,13 @@ function gridSVG(ro, vb) {
   let out = `<path d="${d}" fill="none" stroke="${GRID}" stroke-width="${f(ro.lw * 0.9)}" stroke-linejoin="round"/>`;
   const cpm = S.cellsPerMile;
   if (G.type === 'square' && ro.mileLines && cpm > 1 && Math.abs(cpm - Math.round(cpm)) < 1e-9) {
+    // Lines sit on whole miles of the ground, counted from where the map started (rows/columns
+    // added at the left or top don't move them). An area only gets the lines inside it.
+    const c0 = A ? A.c0 : 0, c1 = A ? A.c1 + 1 : S.cols, r0 = A ? A.r0 : 0, r1 = A ? A.r1 + 1 : S.rows;
+    const first = (lo, o) => lo + ((((o - lo) % cpm) + cpm) % cpm);
     let m = '';
-    for (let c = 0; c <= S.cols; c += cpm) m += `M${c},0V${S.rows}`;
-    for (let r = 0; r <= S.rows; r += cpm) m += `M0,${r}H${S.cols}`;
+    for (let c = first(c0, G.origin.c); c <= c1; c += cpm) m += `M${c},${r0}V${r1}`;
+    for (let r = first(r0, G.origin.r); r <= r1; r += cpm) m += `M${c0},${r}H${c1}`;
     out += `<path d="${m}" fill="none" stroke="${INK}" stroke-width="${f(ro.lw * 2.6)}"/>`;
   }
   return out;
@@ -624,6 +648,7 @@ function labelsSVG(ro, vb) {
   return S.labels.map(L => {
     const [x, y] = labelPos(L);
     if (vb && !inView(vb, x, y)) return '';
+    if (ro.area) { const k = labelCell(L); if (!k || !inArea(ro.area, ...parseKey(k))) return ''; }
     let fs = LABEL_FS[L.size] || LABEL_FS.m;
     if (ro.labelMin) fs = Math.max(fs, ro.labelMin * fs / LABEL_FS.m);
     return `<g data-label="${esc(L.id)}"><text x="${f(x)}" y="${f(y)}" dy="0.35em" font-size="${f(fs)}" font-weight="700" font-family="${FONT}" ` +
@@ -637,6 +662,7 @@ function inView(vb, x, y) { return x > vb.x - 1 && x < vb.x + vb.w + 1 && y > vb
 function mapContentSVG(ro, vb, wrap) {
   let fill = '', icon = '', coord = '', feat = '', site = '';
   for (let r = 0; r < S.rows; r++) for (let c = 0; c < S.cols; c++) {
+    if (ro.area && !inArea(ro.area, c, r)) continue;
     if (vb && !inView(vb, ...G.center(c, r))) continue;
     const fi = cellFillSVG(c, r, ro), ic = cellIconSVG(c, r, ro), fe = cellFeatSVG(c, r), si = cellSiteSVG(c, r, ro);
     if (wrap) { fill += `<g>${fi}</g>`; icon += `<g>${ic}</g>`; feat += `<g>${fe}</g>`; site += `<g>${si}</g>`; }
@@ -651,9 +677,51 @@ function mapContentSVG(ro, vb, wrap) {
     `<g class="L-icon" ${iconGroupAttrs(ro)}>${icon}</g>` +
     `<g class="L-coord" font-size="0.11" font-family="${FONT}" fill="#333" text-anchor="middle">${coord}</g>` +
     `<g class="L-feat">${feat}</g>` +
-    `<g class="L-edge">${edgesSVG(vb)}</g>` +
+    `<g class="L-edge">${edgesSVG(vb, ro.area)}</g>` +
     `<g class="L-site" ${iconGroupAttrs(ro)}>${site}</g>` +
     `<g class="L-label">${labelsSVG(ro, vb)}</g>`;
+}
+
+// ---------------------------------------------------------------- areas (geometry)
+const inArea = (a, c, r) => c >= a.c0 && c <= a.c1 && r >= a.r0 && r <= a.r1;
+const areaById = id => (id && S.areas.find(a => a.id === id)) || null;
+function edgeTouchesArea(a, k) {
+  const [p, q] = k.split('|').map(parseKey);
+  return inArea(a, ...p) || inArea(a, ...q);
+}
+// The area's cells that can touch its outline (inner cells never have an outside neighbor).
+function areaRim(a) {
+  const out = [];
+  for (let r = a.r0; r <= a.r1; r++) for (let c = a.c0; c <= a.c1; c++) {
+    if (r === a.r0 || r === a.r1 || c === a.c0 || c === a.c1) out.push([c, r]);
+  }
+  return out;
+}
+function areaBox(a) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const [c, r] of areaRim(a)) for (const [x, y] of G.corners(c, r)) {
+    x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+  }
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+// SVG path along the outside of an area's cells (follows the hex zig-zag).
+function areaOutlineD(a) {
+  let d = '';
+  for (const [c, r] of areaRim(a)) {
+    const cs = G.corners(c, r);
+    for (let i = 0; i < G.n; i++) {
+      if (inArea(a, ...G.nb(c, r, i))) continue;
+      const p = cs[i], q = cs[(i + 1) % G.n];
+      d += `M${f(p[0])},${f(p[1])}L${f(q[0])},${f(q[1])}`;
+    }
+  }
+  return d;
+}
+const areaSize = a => `${a.c1 - a.c0 + 1} × ${a.r1 - a.r0 + 1}`;
+// Keep areas inside the grid; drop any that no longer cover a cell.
+function clampAreas(areas, cols, rows) {
+  return areas.map(a => Object.assign({}, a, { c0: Math.max(0, a.c0), r0: Math.max(0, a.r0), c1: Math.min(cols - 1, a.c1), r1: Math.min(rows - 1, a.r1) }))
+    .filter(a => a.c0 <= a.c1 && a.r0 <= a.r1);
 }
 
 // ---------------------------------------------------------------- editor rendering
@@ -662,15 +730,54 @@ let layers = {};
 
 function editorRO() { return Object.assign({ lw: 1.3 / PX }, S.view); }
 
+// What the editor shows: the whole map, or the focused area plus a little of its surroundings.
+function editorView() {
+  const a = focusArea();
+  if (!a) return { x: -PAD, y: -PAD, w: G.width + 2 * PAD, h: G.height + 2 * PAD };
+  const b = areaBox(a), m = 0.45;
+  return { x: b.x - m, y: b.y - m, w: b.w + 2 * m, h: b.h + 2 * m };
+}
+const focusArea = () => areaById(S.view.focus);
+
 function renderAll() {
-  G = makeGeom(S.gridType, S.cols, S.rows);
-  const W = G.width + 2 * PAD, H = G.height + 2 * PAD;
-  svg.setAttribute('viewBox', `${-PAD} ${-PAD} ${f(W)} ${f(H)}`);
-  svg.innerHTML = mapContentSVG(editorRO(), null, true) + '<g class="L-hover" pointer-events="none"></g>';
-  for (const n of ['fill', 'icon', 'feat', 'edge', 'site', 'label', 'hover']) layers[n] = svg.querySelector('.L-' + n);
+  G = makeGeom(S.gridType, S.cols, S.rows, S.origin);
+  if (S.view.focus && !focusArea()) S.view.focus = null;
+  const V = editorView();
+  svg.setAttribute('viewBox', `${f(V.x)} ${f(V.y)} ${f(V.w)} ${f(V.h)}`);
+  svg.innerHTML = mapContentSVG(editorRO(), null, true) +
+    '<g class="L-areas" pointer-events="none"></g><g class="L-hover" pointer-events="none"></g>';
+  for (const n of ['fill', 'icon', 'feat', 'edge', 'site', 'label', 'areas', 'hover']) layers[n] = svg.querySelector('.L-' + n);
+  drawAreas();
   applyZoom();
   updateMapInfo();
+  renderAreaUI();
   $('#map-title').value = S.title;
+}
+// Area outlines with their names; when focused, everything outside the area is faded.
+function drawAreas() {
+  const focus = focusArea();
+  let out = '';
+  if (focus) {
+    const V = editorView();
+    let d = '';
+    for (let r = 0; r < S.rows; r++) for (let c = 0; c < S.cols; c++) {
+      if (inArea(focus, c, r) || !inView(V, ...G.center(c, r))) continue;
+      d += 'M' + G.corners(c, r).map(p => f(p[0]) + ',' + f(p[1])).join('L') + 'Z';
+    }
+    out += `<path d="${d}" fill="#d9d6cf" fill-opacity="0.72" stroke="none"/>`;
+  }
+  const show = S.view.areaOutlines ? S.areas : (focus ? [focus] : []);
+  for (const a of show) {
+    const d = areaOutlineD(a), mine = focus && a.id === focus.id;
+    out += `<path d="${d}" fill="none" stroke="#fff" stroke-width="0.12" stroke-linecap="round"/>` +
+      `<path d="${d}" fill="none" stroke="#7a1fa2" stroke-width="0.06" stroke-linecap="round" stroke-dasharray="${mine ? 'none' : '0.18 0.1'}"/>`;
+    if (!mine) {
+      const b = areaBox(a);
+      out += `<text x="${f(b.x + 0.08)}" y="${f(b.y + 0.3)}" font-size="0.24" font-weight="700" font-family="${FONT}" fill="#7a1fa2" ` +
+        `stroke="#fff" stroke-width="0.07" paint-order="stroke">${esc(a.name)}</text>`;
+    }
+  }
+  layers.areas.innerHTML = out;
 }
 
 function redrawCells(set) {
@@ -697,9 +804,9 @@ function withNeighbors(set) {
 function redrawEdges() { layers.edge.innerHTML = edgesSVG(null); }
 
 function applyZoom() {
-  const W = G.width + 2 * PAD, H = G.height + 2 * PAD;
-  svg.style.width = Math.round(W * PX * ui.zoom) + 'px';
-  svg.style.height = Math.round(H * PX * ui.zoom) + 'px';
+  const V = editorView();
+  svg.style.width = Math.round(V.w * PX * ui.zoom) + 'px';
+  svg.style.height = Math.round(V.h * PX * ui.zoom) + 'px';
   $('#zoom-label').textContent = Math.round(ui.zoom * 100) + '%';
 }
 function setZoom(z, anchor) {
@@ -715,7 +822,7 @@ function setZoom(z, anchor) {
 }
 function zoomFit() {
   const sc = $('#scroller');
-  const W = (G.width + 2 * PAD) * PX, H = (G.height + 2 * PAD) * PX;
+  const V = editorView(), W = V.w * PX, H = V.h * PX;
   setZoom(Math.min((sc.clientWidth - 30) / W, (sc.clientHeight - 30) / H));
 }
 
@@ -725,7 +832,12 @@ function scaleText() {
   return `1 ${cellWord()} = ${fmtNum(mi)} mile${mi <= 1 ? '' : 's'} across (${ft.toLocaleString()} ft) · ${fmtNum(cpm)} ${cellWord(cpm !== 1)} per mile`;
 }
 function updateMapInfo() {
-  const cpm = S.cellsPerMile;
+  const cpm = S.cellsPerMile, a = focusArea();
+  if (a) {
+    const b = areaBox(a);
+    $('#map-info').textContent = `Area “${a.name}”: ${areaSize(a)} ${cellWord(true)} · ${fmtNum(b.w / cpm)} × ${fmtNum(b.h / cpm)} mi · whole map ${S.cols} × ${S.rows}`;
+    return;
+  }
   $('#map-info').textContent = `${S.cols} × ${S.rows} ${cellWord(true)} · covers ${fmtNum(G.width / cpm)} × ${fmtNum(G.height / cpm)} mi · ${scaleText()}`;
 }
 
@@ -938,6 +1050,7 @@ function onPointerDown(e) {
   svg.setPointerCapture(e.pointerId);
   const [x, y] = evtPt(e);
   if (ui.tool === 'label') { labelPointerDown(e, x, y); return; }
+  if (ui.tool === 'area') { areaPointerDown(e, x, y); return; }
   stroke = { before: snapshot(), erase: e.button === 2, shift: e.shiftKey, mode: null, changed: false,
              lastCell: null, lastEdge: null, lastPt: [x, y], pointerId: e.pointerId, moved: false,
              linkCells: new Set(), firstLink: null };
@@ -954,6 +1067,7 @@ function onPointerMove(e) {
   if (pan) { doPan(e); return; }
   const [x, y] = evtPt(e);
   if (labelDrag) { labelPointerMove(x, y); return; }
+  if (areaDrag) { areaPointerMove(x, y); return; }
   showHover(x, y);
   if (!stroke || e.pointerId !== stroke.pointerId) return;
   if (Math.hypot(x - stroke.lastPt[0], y - stroke.lastPt[1]) > 0.05) stroke.moved = true;
@@ -986,6 +1100,7 @@ function endStroke() {
 function onPointerUp(e) {
   if (pan) { endPan(); return; }
   if (labelDrag) { labelPointerUp(); return; }
+  if (areaDrag) { areaPointerUp(); return; }
   if (stroke && e.pointerId === stroke.pointerId) endStroke();
 }
 
@@ -1117,16 +1232,184 @@ function closeLabelDialog(action) {
   scheduleSave();
 }
 
+// ---------------------------------------------------------------- areas (editing)
+let areaDrag = null;
+const clampCell = (c, r) => [clamp(c, 0, S.cols - 1), clamp(r, 0, S.rows - 1)];
+const rectOf = (p, q) => ({ c0: Math.min(p[0], q[0]), r0: Math.min(p[1], q[1]), c1: Math.max(p[0], q[0]), r1: Math.max(p[1], q[1]) });
+
+function startAreaTool(redrawId) {
+  if (ui.tool !== 'area') ui.prevTool = ui.tool;
+  ui.areaRedraw = redrawId || null;
+  // Redrawing an area needs room to make it bigger, so show the whole map.
+  if (redrawId && S.view.focus) setFocus(null);
+  setTool('area');
+}
+function endAreaTool() {
+  areaDrag = null;
+  ui.areaRedraw = null;
+  if (layers.hover) layers.hover.innerHTML = '';
+  setTool(ui.prevTool && ui.prevTool !== 'area' ? ui.prevTool : 'terrain');
+}
+function areaPointerDown(e, x, y) {
+  if (e.button === 2) { endAreaTool(); return; }
+  const p = clampCell(...G.pick(x, y));
+  areaDrag = { start: p, rect: rectOf(p, p) };
+  showAreaDrag();
+}
+function areaPointerMove(x, y) {
+  areaDrag.rect = rectOf(areaDrag.start, clampCell(...G.pick(x, y)));
+  showAreaDrag();
+}
+function showAreaDrag() {
+  const a = areaDrag.rect;
+  layers.hover.innerHTML = hl(areaOutlineD(a));
+  $('#status').textContent = `Area ${areaSize(a)} ${cellWord(true)}, ${coordLabel(a.c0, a.r0)} to ${coordLabel(a.c1, a.r1)}`;
+}
+function areaPointerUp() {
+  const rect = areaDrag.rect, editing = areaById(ui.areaRedraw);
+  areaDrag = null;
+  layers.hover.innerHTML = '';
+  const before = snapshot();
+  if (editing) Object.assign(editing, rect);
+  else {
+    const name = prompt(`Name this area (${areaSize(rect)} ${cellWord(true)}):`, `Area ${S.areas.length + 1}`);
+    if (name === null) return;   // cancelled: the tool stays on so you can drag again
+    S.areas.push(Object.assign({ id: newId(), name: name.trim() || `Area ${S.areas.length + 1}` }, rect));
+  }
+  pushUndo(before);
+  scheduleSave();
+  endAreaTool();
+  renderAll();
+}
+function setFocus(id) {
+  S.view.focus = areaById(id) ? id : null;
+  renderAll();
+  zoomFit();
+  scheduleSave();
+}
+function renameArea(a) {
+  const name = prompt('Rename area:', a.name);
+  if (name === null || !name.trim() || name.trim() === a.name) return;
+  const before = snapshot();
+  a.name = name.trim();
+  pushUndo(before);
+  scheduleSave();
+  renderAll();
+}
+function deleteArea(a) {
+  if (!confirm(`Delete the area “${a.name}”? The map itself is not changed. (You can undo this.)`)) return;
+  const before = snapshot();
+  S.areas = S.areas.filter(x => x !== a);
+  pushUndo(before);
+  if (S.view.focus === a.id) setFocus(null); else renderAll();
+  scheduleSave();
+}
+function renderAreaUI() {
+  const word = cellWord(true);
+  $('#area-list').innerHTML = S.areas.length ? S.areas.map(a =>
+    `<li data-area="${esc(a.id)}"><div class="area-head"><b>${esc(a.name)}</b> <span class="area-size">${areaSize(a)} ${word}, ${coordLabel(a.c0, a.r0)} to ${coordLabel(a.c1, a.r1)}</span></div>` +
+    `<div class="area-btns"><button data-act="focus" aria-pressed="${S.view.focus === a.id}">Focus</button><button data-act="print">Print…</button>` +
+    `<button data-act="redraw" aria-pressed="${ui.tool === 'area' && ui.areaRedraw === a.id}">Redraw</button><button data-act="rename">Rename</button>` +
+    `<button data-act="delete" class="danger" aria-label="Delete area ${esc(a.name)}">Delete</button></div></li>`).join('')
+    : '<li class="fine">No areas yet. An area is a part of the map you can focus on while editing, or print by itself at its own cell size.</li>';
+  $('#focus-select').innerHTML = `<option value="">Whole map</option>` + S.areas.map(a => `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join('');
+  $('#focus-select').value = S.view.focus || '';
+  $('#focus-select').disabled = !S.areas.length;
+  $('#btn-area-new').setAttribute('aria-pressed', String(ui.tool === 'area' && !ui.areaRedraw));
+}
+
+// ---------------------------------------------------------------- add / remove rows and columns
+/* Grow (n > 0) or trim (n < 0) the map on one side. Everything keeps its place on the ground:
+ * cells, borders, roads, rivers, labels and areas all move with the grid. */
+function growEdge(side, n) {
+  if (!n) return;
+  const dl = side === 'left' ? n : 0, dt = side === 'top' ? n : 0;
+  const cols = S.cols + dl + (side === 'right' ? n : 0), rows = S.rows + dt + (side === 'bottom' ? n : 0);
+  const word = side === 'left' || side === 'right' ? 'column' : 'row';
+  if (cols < 1 || rows < 1) { alert(`The map can't have fewer than 1 ${word}.`); return; }
+  if (cols * rows > MAX_CELLS) { alert(`That would be ${(cols * rows).toLocaleString()} cells; the limit is ${MAX_CELLS.toLocaleString()}.`); return; }
+  const origin = { c: S.origin.c + dl, r: S.origin.r + dt };
+  const newG = makeGeom(S.gridType, cols, rows, origin);
+  const mv = k => { const [c, r] = parseKey(k); return [c + dl, r + dt]; };
+  const mvPair = lk => { const [a, b] = lk.split('|'); return edgeKey(...mv(a), ...mv(b)); };
+  const pairIn = lk => lk.split('|').some(k => newG.inB(...parseKey(k)));
+
+  const cells = {};
+  let lostCells = 0;
+  for (const [k, cell] of Object.entries(S.cells)) {
+    const p = mv(k);
+    if (newG.inB(...p)) cells[key(...p)] = cell; else lostCells++;
+  }
+  const moveLinks = links => {
+    const out = {};
+    for (const lk of Object.keys(links)) { const nk = mvPair(lk); if (pairIn(nk)) out[nk] = true; }
+    return out;
+  };
+  const edges = {};
+  let lostEdges = 0;
+  for (const [k, e] of Object.entries(S.edges)) {
+    const nk = mvPair(k);
+    if (!pairIn(nk)) { lostEdges++; continue; }
+    edges[nk] = e.cliff ? Object.assign({}, e, { cliff: key(...mv(e.cliff)) }) : e;
+  }
+  const dy = dt * (S.gridType === 'hex' ? VSTEP : 1);
+  const labels = [];
+  for (const L of S.labels) {
+    const n2 = Object.assign({}, L);
+    if (L.cell) n2.cell = key(...mv(L.cell));
+    else { n2.x = L.x + dl; n2.y = L.y + dy; }
+    const k = n2.cell || key(...newG.pick(n2.x, n2.y));
+    // Labels over cells that were cut off go with them; labels floating off the map stay.
+    if (!newG.inB(...parseKey(k)) && (L.cell || G.inB(...G.pick(L.x, L.y)))) continue;
+    labels.push(n2);
+  }
+  const lostLabels = S.labels.length - labels.length;
+  const areas = clampAreas(S.areas.map(a => Object.assign({}, a, { c0: a.c0 + dl, c1: a.c1 + dl, r0: a.r0 + dt, r1: a.r1 + dt })), cols, rows);
+  const lostAreas = S.areas.filter(a => !areas.some(b => b.id === a.id)).map(a => `“${a.name}”`);
+
+  if (n < 0) {
+    const what = [lostCells && `${lostCells} painted cell(s)`, lostEdges && `${lostEdges} border feature(s)`,
+      lostLabels && `${lostLabels} label(s)`, lostAreas.length && `the area(s) ${lostAreas.join(', ')}`].filter(Boolean);
+    if (what.length && !confirm(`Removing ${-n} ${word}${n < -1 ? 's' : ''} from the ${side} deletes ${what.join(', ')}. (You can undo this.) Continue?`)) return;
+  }
+  const before = snapshot();
+  Object.assign(S, {
+    cols, rows, origin, cells, edges, labels, areas,
+    roadLinks: moveLinks(S.roadLinks), riverLinks: moveLinks(S.riverLinks),
+    widthMiles: cols / S.cellsPerMile, heightMiles: newG.height / S.cellsPerMile,
+  });
+  if (S.gridType === 'square') S.heightMiles = rows / S.cellsPerMile;
+  pushUndo(before);
+  syncSettingsInputs();
+  const sc = $('#scroller'), focused = !!focusArea();
+  renderAll();
+  // Keep the same part of the map under the screen when the left or top edge moves.
+  if (!focused) { sc.scrollLeft += dl * PX * ui.zoom; sc.scrollTop += dy * PX * ui.zoom; }
+  scheduleSave();
+  $('#status').textContent = `${n > 0 ? 'Added' : 'Removed'} ${Math.abs(n)} ${word}${Math.abs(n) > 1 ? 's' : ''} ${n > 0 ? 'on' : 'from'} the ${side}. Map is now ${cols} × ${rows}.`;
+}
+
 // ---------------------------------------------------------------- map setup (resize / rescale)
 function readSetupInputs() {
   const type = document.querySelector('input[name="gridType"]:checked').value;
   const w = parseFloat($('#set-width').value), h = parseFloat($('#set-height').value), cpm = parseFloat($('#set-cpm').value);
   return { type, w, h, cpm, ok: w > 0 && h > 0 && cpm > 0 };
 }
+// Miles as shown in the size boxes. After rows/columns are added the exact size can be an awkward
+// fraction, so it is shown rounded, and an unchanged (rounded) value keeps the current count.
+const shownMiles = v => Math.round(v * 100) / 100;
+function targetDims(s) {
+  const d = dims(s.type, s.w, s.h, s.cpm);
+  if (s.type === S.gridType && s.cpm === S.cellsPerMile) {
+    if (s.w === shownMiles(S.widthMiles)) d.cols = S.cols;
+    if (s.h === shownMiles(S.heightMiles)) d.rows = S.rows;
+  }
+  return d;
+}
 function updateSetupPreview() {
   const s = readSetupInputs(), el = $('#setup-preview');
   if (!s.ok) { el.textContent = 'Enter a width, height and cells per mile above zero.'; return; }
-  const d = dims(s.type, s.w, s.h, s.cpm), g = makeGeom(s.type, d.cols, d.rows);
+  const d = targetDims(s), g = makeGeom(s.type, d.cols, d.rows, s.type === S.gridType && s.cpm === S.cellsPerMile ? S.origin : null);
   const word = s.type === 'hex' ? 'hexes' : 'squares', one = s.type === 'hex' ? 'hex' : 'square';
   const total = d.cols * d.rows;
   el.innerHTML = `→ <b>${d.cols} × ${d.rows} ${word}</b> (${total.toLocaleString()} cells), covering ${fmtNum(g.width / s.cpm)} × ${fmtNum(g.height / s.cpm)} miles.<br>` +
@@ -1136,14 +1419,16 @@ function updateSetupPreview() {
 function applySetup() {
   const s = readSetupInputs();
   if (!s.ok) return;
-  const d = dims(s.type, s.w, s.h, s.cpm);
+  const d = targetDims(s);
   if (d.cols * d.rows > MAX_CELLS) { alert(`That would be ${(d.cols * d.rows).toLocaleString()} cells; the limit is ${MAX_CELLS.toLocaleString()}. Use fewer cells per mile or a smaller area.`); return; }
   const sameGrid = s.type === S.gridType && s.cpm === S.cellsPerMile;
   const edgeCount = Object.keys(S.edges).length;
   if (!sameGrid && edgeCount && !confirm(`Changing the grid type or cells per mile removes the ${edgeCount} river, cliff, wall and gate segment(s) drawn on cell borders. (Terrain, roads, in-cell rivers/cliffs, sites and labels are re-fitted to the new grid.) Continue?`)) return;
   const before = snapshot();
   const oldG = G, oldCpm = S.cellsPerMile, oldCells = S.cells;
-  const newG = makeGeom(s.type, d.cols, d.rows), cells = {};
+  // Same grid: keep the hex row offsets. New grid: lay it out fresh from the top-left.
+  const origin = sameGrid ? S.origin : { c: 0, r: 0 };
+  const newG = makeGeom(s.type, d.cols, d.rows, origin), cells = {};
   // Resample by ground position: the new cell takes whatever old cell sat at its center.
   for (let r = 0; r < d.rows; r++) for (let c = 0; c < d.cols; c++) {
     let src;
@@ -1233,7 +1518,18 @@ function applySetup() {
     return n;
   }).filter(Boolean);
   const lost = S.labels.length - labels.length;
-  Object.assign(S, { gridType: s.type, widthMiles: s.w, heightMiles: s.h, cellsPerMile: s.cpm, cols: d.cols, rows: d.rows, cells, edges, roadLinks, riverLinks, labels });
+  // Areas: same grid keeps their cells; a new grid takes the cells under their corner cells' centers.
+  let areas = S.areas.map(a => {
+    if (sameGrid) return Object.assign({}, a);
+    const [c0, r0] = newG.pick(...oldG.center(a.c0, a.r0).map(v => v * k2));
+    const [c1, r1] = newG.pick(...oldG.center(a.c1, a.r1).map(v => v * k2));
+    return Object.assign({}, a, rectOf([c0, r0], [c1, r1]));
+  });
+  areas = clampAreas(areas, d.cols, d.rows);
+  // Keep a whole-number size if the boxes weren't touched for that direction.
+  const wMi = d.cols === S.cols && sameGrid && s.w === shownMiles(S.widthMiles) ? S.widthMiles : s.w;
+  const hMi = d.rows === S.rows && sameGrid && s.h === shownMiles(S.heightMiles) ? S.heightMiles : s.h;
+  Object.assign(S, { gridType: s.type, widthMiles: wMi, heightMiles: hMi, cellsPerMile: s.cpm, cols: d.cols, rows: d.rows, cells, edges, roadLinks, riverLinks, labels, origin, areas });
   if (lost) alert(`${lost} label(s) were outside the new map area and were removed. Undo brings them back.`);
   pushUndo(before);
   renderAll();
@@ -1242,8 +1538,8 @@ function applySetup() {
 }
 function syncSettingsInputs() {
   document.querySelectorAll('input[name="gridType"]').forEach(i => { i.checked = i.value === S.gridType; });
-  $('#set-width').value = S.widthMiles;
-  $('#set-height').value = S.heightMiles;
+  $('#set-width').value = shownMiles(S.widthMiles);
+  $('#set-height').value = shownMiles(S.heightMiles);
   $('#set-cpm').value = S.cellsPerMile;
   updateSetupPreview();
 }
@@ -1299,26 +1595,52 @@ function refreshToolUI() {
   });
   svg.classList.toggle('tool-label', ui.tool === 'label');
   $('#brush-row').style.visibility = BRUSH_TOOLS.has(ui.tool) ? 'visible' : 'hidden';
-  $('#tool-hint').textContent = TOOL_HINTS[ui.tool];
+  const redraw = ui.tool === 'area' && areaById(ui.areaRedraw);
+  $('#tool-hint').textContent = redraw ? `Drag across the map to set the new extent of “${redraw.name}”. Right-click or Esc cancels.` : TOOL_HINTS[ui.tool];
+  svg.classList.toggle('tool-area', ui.tool === 'area');
   if (layers.hover) layers.hover.innerHTML = '';
+  if (layers.areas) renderAreaUI();
 }
-function setTool(t) { ui.tool = t; refreshToolUI(); }
+function setTool(t) {
+  if (t !== 'area') { ui.areaRedraw = null; areaDrag = null; }
+  ui.tool = t;
+  refreshToolUI();
+}
 
 // ---------------------------------------------------------------- printing
 const HEAD_H = 0.45, LEG_IW = 1.25, LEG_RH = 0.4;
 const FEATURE_LEGEND = [['highway', 'Highway'], ['trail', 'Road / trail'], ['river', 'River'], ['cliff', 'Cliff'],
   ['stockade', 'Stockade'], ['wall', 'Stone wall'], ['gate', 'Gate']];
-// Only symbols that actually appear on the map go in the key (all terrains if the map is empty).
+// What is being printed: the whole map (null) or one area, and that target's own print settings.
+const printArea = () => areaById(S.print.target);
+function curPrint() {
+  const a = printArea();
+  if (!a) return S.print;
+  // First time: start from the whole-map settings, but at a fixed cell size (areas are usually for play).
+  const P = Object.assign(defaultPrint(), S.print, { mode: 'size' }, S.areaPrint[a.id]);
+  delete P.target;
+  return (S.areaPrint[a.id] = P);
+}
+// Printed region in cell units (before the white PAD around it).
+function printBox() {
+  const a = printArea();
+  return a ? areaBox(a) : { x: 0, y: 0, w: G.width, h: G.height };
+}
+// Only symbols that actually appear on the map (or the area being printed) go in the key; all terrains if it's empty.
 function legendItems() {
-  const used = new Set();
-  for (const cell of Object.values(S.cells)) {
+  const used = new Set(), A = printArea();
+  for (const [k, cell] of Object.entries(S.cells)) {
+    if (A && !inArea(A, ...parseKey(k))) continue;
     if (cell.t) used.add(cell.t);
     if (cell.road) used.add(cell.road);
     if (cell.river) used.add('river');
     if (cell.cliff) used.add('cliff');
     if (cell.site) used.add(cell.site);
   }
-  for (const e of Object.values(S.edges)) for (const p of ['river', 'cliff', 'stockade', 'wall', 'gate']) if (e[p]) used.add(p);
+  for (const [k, e] of Object.entries(S.edges)) {
+    if (A && !edgeTouchesArea(A, k)) continue;
+    for (const p of ['river', 'cliff', 'stockade', 'wall', 'gate']) if (e[p]) used.add(p);
+  }
   const items = [
     ...TERRAINS.filter(t => used.has(t.id)).map(t => ({ kind: t.id, label: t.name })),
     ...FEATURE_LEGEND.filter(([k]) => used.has(k)).map(([kind, label]) => ({ kind, label })),
@@ -1348,21 +1670,24 @@ function legendSVG(width, ro, z = 1) {
 }
 
 function printLayout() {
-  const P = S.print, m = clamp(+P.margin || 0.5, 0.2, 1.5);
-  const Wu = G.width + 2 * PAD, Hu = G.height + 2 * PAD;
+  const P = curPrint(), m = clamp(+P.margin || 0.5, 0.2, 1.5), box = printBox();
+  const Wu = box.w + 2 * PAD, Hu = box.h + 2 * PAD;
   const evalO = o => {
     const pw = o === 'landscape' ? 11 : 8.5, ph = o === 'landscape' ? 8.5 : 11;
     const cw = pw - 2 * m, ch = ph - 2 * m - 0.08;   // a hair of slack so browsers don't spill a blank page
     const legH = P.legend === 'every' ? legendHeight(cw) : 0;
     const mw = cw, mh = ch - HEAD_H - 0.05 - (legH ? legH + 0.12 : 0);
-    let cellIn, px = 1, py = 1;
+    let cellIn, px = 1, py = 1, ov = 0;
     if (P.mode === 'fit') cellIn = Math.min(mw / Wu, mh / Hu);
     else {
       cellIn = clamp(+P.cellInches || 1, 0.2, 4);
-      px = Math.ceil(Wu * cellIn / mw - 1e-6);
-      py = Math.ceil(Hu * cellIn / mh - 1e-6);
+      // Overlap: each page repeats this much of the page before it, so pages can be glued over each other.
+      ov = clamp(+P.overlap || 0, 0, Math.min(mw, mh) / 3);
+      const count = (len, room) => len <= room + 1e-6 ? 1 : Math.ceil((len - ov) / (room - ov) - 1e-6);
+      px = count(Wu * cellIn, mw);
+      py = count(Hu * cellIn, mh);
     }
-    return { o, m, pw, ph, cw, ch, mw, mh, legH, cellIn, px, py, pages: px * py, Wu, Hu };
+    return { o, m, pw, ph, cw, ch, mw, mh, legH, cellIn, ov, px, py, pages: px * py, Wu, Hu, box, P };
   };
   if (P.orientation === 'auto') {
     const a = evalO('portrait'), b = evalO('landscape');
@@ -1372,8 +1697,9 @@ function printLayout() {
   return evalO(P.orientation === 'landscape' ? 'landscape' : 'portrait');
 }
 function printRO(L) {
-  return Object.assign({}, S.view, { lw: clamp(0.011 / L.cellIn, 0.008, 0.05), colors: !!S.print.color, labelMin: (10 / 72) / L.cellIn });
+  return Object.assign({}, S.view, { lw: clamp(0.011 / L.cellIn, 0.008, 0.05), colors: !!L.P.color, labelMin: (10 / 72) / L.cellIn, area: printArea() });
 }
+const printTitle = () => S.title + (printArea() ? ' — ' + printArea().name : '');
 function scaleBarSVG(L) {
   const ipm = S.cellsPerMile * L.cellIn;        // inches per mile on paper
   const opts = [0.1, 0.25, 0.5, 1, 2, 3, 5, 10, 20];
@@ -1396,48 +1722,60 @@ function pageMapSVG(L, ix, iy) {
   return `<svg viewBox="-0.01 -0.01 ${f(L.px * s + 0.02)} ${f(L.py * s + 0.02)}" style="width:${f(L.px * s + 0.02)}in;height:${f(L.py * s + 0.02)}in">${r}</svg>`;
 }
 function buildPages() {
-  const L = printLayout(), ro = printRO(L), pages = [];
-  const sites = S.print.siteList ? siteEntries() : [];
+  const L = printLayout(), P = L.P, ro = printRO(L), pages = [];
+  const sites = P.siteList ? siteEntries() : [];
   const SITES_PER_PAGE = 76, sitePages = Math.ceil(sites.length / SITES_PER_PAGE);
-  const total = L.pages + (S.print.refPage ? 1 : 0) + sitePages;
+  const total = L.pages + (P.refPage ? 1 : 0) + sitePages;
   const legend = L.legH ? `<div class="pp-legend">${legendSVG(L.cw, ro)}</div>` : '';
-  const tiled = L.pages > 1 || S.print.mode === 'size';
+  const tiled = L.pages > 1 || P.mode === 'size';
+  const x0 = L.box.x - PAD, y0 = L.box.y - PAD;
   let n = 0;
   for (let iy = 0; iy < L.py; iy++) for (let ix = 0; ix < L.px; ix++) {
     n++;
-    let vbx, vby, vbw, vbh, sw, sh;
+    let vbx, vby, vbw, vbh, sw, sh, cut = '';
     if (tiled) {
-      vbw = L.mw / L.cellIn; vbh = L.mh / L.cellIn;
-      vbx = -PAD + ix * vbw; vby = -PAD + iy * vbh;
+      const fw = L.mw / L.cellIn, fh = L.mh / L.cellIn, ovu = L.ov / L.cellIn, stepX = fw - ovu, stepY = fh - ovu;
+      vbx = x0 + ix * stepX; vby = y0 + iy * stepY;
       // Shrink the last row/column of pages to the map's real extent.
-      vbw = Math.min(vbw, L.Wu - ix * vbw); vbh = Math.min(vbh, L.Hu - iy * vbh);
+      vbw = Math.min(fw, L.Wu - ix * stepX); vbh = Math.min(fh, L.Hu - iy * stepY);
       sw = vbw * L.cellIn; sh = vbh * L.cellIn;
+      // Dashed cut lines where the page before this one ends.
+      if (ovu > 0 && (ix > 0 || iy > 0)) {
+        let d = '';
+        if (ix > 0) d += `M${f(vbx + ovu)},${f(vby)}V${f(vby + vbh)}`;
+        if (iy > 0) d += `M${f(vbx)},${f(vby + ovu)}H${f(vbx + vbw)}`;
+        const w = 0.012 / L.cellIn;
+        cut = `<path d="${d}" fill="none" stroke="#fff" stroke-width="${f(w * 3)}"/>` +
+          `<path d="${d}" fill="none" stroke="#111" stroke-width="${f(w)}" stroke-dasharray="${f(w * 8)} ${f(w * 5)}"/>`;
+      }
     } else {
-      vbx = -PAD; vby = -PAD; vbw = L.Wu; vbh = L.Hu; sw = L.Wu * L.cellIn; sh = L.Hu * L.cellIn;
+      vbx = x0; vby = y0; vbw = L.Wu; vbh = L.Hu; sw = L.Wu * L.cellIn; sh = L.Hu * L.cellIn;
     }
     const vb = { x: vbx, y: vby, w: vbw, h: vbh };
     const where = L.pages > 1 ? `<div>Page ${n} of ${total}<br>Row ${iy + 1}, column ${ix + 1}</div>${pageMapSVG(L, ix, iy)}` : (total > 1 ? `<div>Page 1 of ${total}</div>` : '');
     pages.push(
       `<section class="print-page" style="width:${f(L.cw)}in;height:${f(L.ch)}in">` +
-      `<div class="pp-head" style="height:${HEAD_H}in"><div class="pp-left"><div class="pp-title">${esc(S.title)}</div>` +
+      `<div class="pp-head" style="height:${HEAD_H}in"><div class="pp-left"><div class="pp-title">${esc(printTitle())}</div>` +
       `<div class="pp-sub">${esc(scaleText())}</div></div><div class="pp-scale">${scaleBarSVG(L)}</div><div class="pp-page">${where}</div></div>` +
       `<div class="pp-map${tiled ? ' tiled' : ''}" style="height:${f(L.mh)}in">` +
-      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vbx)} ${f(vby)} ${f(vbw)} ${f(vbh)}" style="width:${f(sw)}in;height:${f(sh)}in">${mapContentSVG(ro, vb, false)}</svg></div>` +
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${f(vbx)} ${f(vby)} ${f(vbw)} ${f(vbh)}" style="width:${f(sw)}in;height:${f(sh)}in">${mapContentSVG(ro, vb, false)}${cut}</svg></div>` +
       legend + `</section>`);
   }
-  if (S.print.refPage) pages.push(refPageHTML(L, ro, pages.length + 1, total));
+  if (P.refPage) pages.push(refPageHTML(L, ro, pages.length + 1, total));
   for (let i = 0; i < sitePages; i++) pages.push(siteListHTML(L, sites.slice(i * SITES_PER_PAGE, (i + 1) * SITES_PER_PAGE), i, pages.length + 1, total));
   return { L, pages };
 }
 // Every named place (label) plus any unnamed site, with the cell it is in.
 function siteEntries() {
-  const named = new Set(), out = [];
+  const named = new Set(), out = [], A = printArea();
   for (const L of S.labels) {
     const k = labelCell(L), cell = k && S.cells[k];
+    if (A && !(k && inArea(A, ...parseKey(k)))) continue;
     if (k) named.add(k);
     out.push({ name: L.text, coord: k ? coordLabel(...parseKey(k)) : '—', type: cell && cell.site ? SMAP[cell.site].name : '' });
   }
   for (const [k, cell] of Object.entries(S.cells)) {
+    if (A && !inArea(A, ...parseKey(k))) continue;
     if (cell.site && SMAP[cell.site] && !named.has(k)) out.push({ name: `(unnamed ${SMAP[cell.site].name.toLowerCase()})`, coord: coordLabel(...parseKey(k)), type: SMAP[cell.site].name });
   }
   // Named places first (alphabetical), then unnamed sites.
@@ -1445,17 +1783,20 @@ function siteEntries() {
 }
 function siteListHTML(L, rows, idx, pageNo, total) {
   return `<section class="print-page ref-page" style="width:${f(L.cw)}in;height:${f(L.ch)}in">` +
-    `<h1>${esc(S.title)} — places${idx ? ' (continued)' : ''}</h1>` +
+    `<h1>${esc(printTitle())} — places${idx ? ' (continued)' : ''}</h1>` +
     `<p style="margin:0 0 .08in;font-size:10.5pt">Cell numbers are column.row, counted from the top-left of the map${S.view.coords ? '' : ' (turn on “Cell numbers” under Display to print them on the map)'}.</p>` +
     `<ol class="site-list">${rows.map(r => `<li><span class="sl-coord">${esc(r.coord)}</span> <b>${esc(r.name)}</b>${r.type ? ` <span class="sl-type">· ${esc(r.type)}</span>` : ''}</li>`).join('')}</ol>` +
     `<div style="margin-top:auto;font-size:9pt;text-align:right">Page ${pageNo} of ${total}</div></section>`;
 }
 function refPageHTML(L, ro, pageNo, total) {
   const items = legendItems().length, z = items <= 16 ? 1.45 : items <= 26 ? 1.2 : 1;
-  const settlements = SITES.filter(x => x.pop && Object.values(S.cells).some(c => c.site === x.id));
+  const A = printArea(), used = new Set(legendItems().map(it => it.kind));
+  const settlements = SITES.filter(x => x.pop && used.has(x.id));
+  const cover = A ? `This area covers ${fmtNum(L.box.w / S.cellsPerMile)} × ${fmtNum(L.box.h / S.cellsPerMile)} miles (${areaSize(A)} ${cellWord(true)}, ${coordLabel(A.c0, A.r0)} to ${coordLabel(A.c1, A.r1)} on the full map)`
+                  : `Map covers ${fmtNum(G.width / S.cellsPerMile)} × ${fmtNum(G.height / S.cellsPerMile)} miles (${S.cols} × ${S.rows} ${cellWord(true)})`;
   return `<section class="print-page ref-page" style="width:${f(L.cw)}in;height:${f(L.ch)}in">` +
-    `<h1>${esc(S.title)} — key</h1>` +
-    `<div>${scaleText()}. Map covers ${fmtNum(G.width / S.cellsPerMile)} × ${fmtNum(G.height / S.cellsPerMile)} miles (${S.cols} × ${S.rows} ${cellWord(true)}).</div>` +
+    `<h1>${esc(printTitle())} — key</h1>` +
+    `<div>${scaleText()}. ${cover}.</div>` +
     `<h2>Map symbols</h2>${legendSVG(L.cw, Object.assign({}, ro, { labels: true, icons: true }), z)}` +
     `<h2>Reading the map</h2><ul>` +
     `<li><b>Highway:</b> solid double line. <b>Road / trail:</b> dashed line. Cells with neither are <b>trackless</b>.</li>` +
@@ -1472,25 +1813,37 @@ function refPageHTML(L, ro, pageNo, total) {
 }
 
 function readPrintInputs() {
-  const P = S.print;
+  const P = curPrint();
   P.mode = document.querySelector('input[name="pmode"]:checked').value;
   P.cellInches = parseFloat($('#p-cell').value) || 1;
   P.orientation = $('#p-orient').value;
   P.margin = parseFloat($('#p-margin').value) || 0.5;
+  P.overlap = Math.max(0, parseFloat($('#p-overlap').value) || 0);
   P.legend = $('#p-legend').value;
   P.refPage = $('#p-ref').checked;
   P.siteList = $('#p-sites').checked;
   P.color = $('#p-color').checked;
-  $('#p-cell').disabled = P.mode !== 'size';
+  syncPrintEnabled(P);
   scheduleSave();
 }
+function syncPrintEnabled(P) {
+  const size = P.mode === 'size';
+  $('#p-cell').disabled = !size;
+  $('#p-overlap').disabled = !size;
+  document.querySelectorAll('[data-cellin]').forEach(b => b.setAttribute('aria-pressed', String(size && Math.abs(+b.dataset.cellin - P.cellInches) < 1e-9)));
+}
 function syncPrintInputs() {
-  const P = S.print;
+  $('#p-target').innerHTML = `<option value="">Whole map (${S.cols} × ${S.rows})</option>` +
+    S.areas.map(a => `<option value="${esc(a.id)}">Area: ${esc(a.name)} (${areaSize(a)})</option>`).join('');
+  if (!printArea()) S.print.target = '';
+  $('#p-target').value = S.print.target || '';
+  const P = curPrint();
   document.querySelectorAll('input[name="pmode"]').forEach(i => { i.checked = i.value === P.mode; });
   $('#p-cell').value = P.cellInches;
-  $('#p-cell').disabled = P.mode !== 'size';
   $('#p-orient').value = P.orientation;
   $('#p-margin').value = P.margin;
+  $('#p-overlap').value = P.overlap || 0;
+  syncPrintEnabled(P);
   $('#p-legend').value = P.legend;
   $('#p-ref').checked = P.refPage;
   $('#p-sites').checked = P.siteList;
@@ -1501,18 +1854,21 @@ function updatePrintPreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(() => {
     const { L, pages } = buildPages();
-    const mapPages = L.pages, word = cellWord(true);
+    const mapPages = L.pages, word = cellWord(true), P = L.P;
     $('#p-summary').innerHTML =
-      `${mapPages} map page${mapPages > 1 ? 's' : ''}${S.print.refPage ? ' + 1 key page' : ''}${pages.length - mapPages - (S.print.refPage ? 1 : 0) > 0 ? ' + place list' : ''}, ${L.o}.<br>` +
-      `${word[0].toUpperCase() + word.slice(1)} print <b>${L.cellIn.toFixed(2)} in</b> across; 1 mile = ${(L.cellIn * S.cellsPerMile).toFixed(2)} in.` +
-      (L.pages > 1 ? `<br>Pages are laid out ${L.px} across × ${L.py} down; trim and tape edge to edge.` : '') +
+      `${mapPages} map page${mapPages > 1 ? 's' : ''}${P.refPage ? ' + 1 key page' : ''}${pages.length - mapPages - (P.refPage ? 1 : 0) > 0 ? ' + place list' : ''}, ${L.o}.<br>` +
+      `${word[0].toUpperCase() + word.slice(1)} print <b>${L.cellIn.toFixed(2)} in</b> across${S.gridType === 'hex' ? ' (flat side to flat side)' : ''}; 1 mile = ${(L.cellIn * S.cellsPerMile).toFixed(2)} in.` +
+      (L.pages > 1 ? `<br>Pages are laid out ${L.px} across × ${L.py} down. ` +
+        (L.ov > 0 ? `Each page repeats the last ${fmtNum(L.ov)} in of the one before it: cut along the dashed line and lay the page over its neighbor so the cut meets that page's map edge, then tape.`
+                  : 'Trim the margins and tape edge to edge.') : '') +
       (L.cellIn < 0.3 ? `<br>⚠ Cells are very small at this size. Consider fixed cell size with several pages.` : '');
     const LIMIT = 24;
     const shown = pages.slice(0, LIMIT).map(p => `<div class="paper" style="width:${L.pw}in;height:${L.ph}in;padding:${L.m}in">${p}</div>`).join('');
     $('#p-preview').innerHTML = shown + (pages.length > LIMIT ? `<div class="more">…and ${pages.length - LIMIT} more pages</div>` : '');
   }, 60);
 }
-function openPrintDialog() {
+function openPrintDialog(target) {
+  S.print.target = target !== undefined ? target : (S.view.focus || '');
   syncPrintInputs();
   $('#print-dialog').showModal();
   updatePrintPreview();
@@ -1562,6 +1918,7 @@ function newMap() {
   if (!confirm('Start a new, empty map? (You can undo this.) The size and scale settings are kept.')) return;
   const before = snapshot();
   S.cells = {}; S.edges = {}; S.roadLinks = {}; S.riverLinks = {}; S.labels = []; S.title = 'Untitled overland map';
+  S.areas = []; S.origin = { c: 0, r: 0 }; S.view.focus = null;
   pushUndo(before);
   renderAll();
   scheduleSave();
@@ -1645,10 +2002,48 @@ function wire() {
   $('#zoom-out').addEventListener('click', () => setZoom(ui.zoom / 1.25));
   $('#zoom-fit').addEventListener('click', zoomFit);
 
-  $('#btn-print').addEventListener('click', openPrintDialog);
+  $('#btn-print').addEventListener('click', () => openPrintDialog());
   const pd = $('#print-dialog');
-  pd.addEventListener('input', () => { readPrintInputs(); updatePrintPreview(); });
-  pd.addEventListener('change', () => { readPrintInputs(); updatePrintPreview(); });
+  const onPrintInput = e => {
+    // Switching what to print loads that target's own settings instead of copying the current ones over.
+    if (e.target.id === 'p-target') { S.print.target = e.target.value; syncPrintInputs(); scheduleSave(); }
+    else readPrintInputs();
+    updatePrintPreview();
+  };
+  pd.addEventListener('input', onPrintInput);
+  pd.addEventListener('change', onPrintInput);
+  $('#p-cell-presets').addEventListener('click', e => {
+    const b = e.target.closest('[data-cellin]');
+    if (!b) return;
+    $('#p-cell').value = b.dataset.cellin;
+    document.querySelector('input[name="pmode"][value="size"]').checked = true;
+    readPrintInputs();
+    updatePrintPreview();
+  });
+
+  // Areas
+  $('#btn-area-new').addEventListener('click', () => { if (ui.tool === 'area' && !ui.areaRedraw) endAreaTool(); else startAreaTool(null); });
+  $('#area-list').addEventListener('click', e => {
+    const b = e.target.closest('[data-act]'), li = e.target.closest('[data-area]');
+    const a = li && areaById(li.dataset.area);
+    if (!b || !a) return;
+    switch (b.dataset.act) {
+      case 'focus': setFocus(S.view.focus === a.id ? null : a.id); break;
+      case 'print': openPrintDialog(a.id); break;
+      case 'redraw': if (ui.tool === 'area' && ui.areaRedraw === a.id) endAreaTool(); else startAreaTool(a.id); break;
+      case 'rename': renameArea(a); break;
+      case 'delete': deleteArea(a); break;
+    }
+  });
+  $('#focus-select').addEventListener('change', e => setFocus(e.target.value || null));
+
+  // Add / remove rows and columns
+  $('#grow-pad').addEventListener('click', e => {
+    const b = e.target.closest('[data-grow]');
+    if (!b) return;
+    const n = clamp(Math.round(parseFloat($('#grow-n').value) || 1), 1, 200);
+    growEdge(b.dataset.grow, n * +b.dataset.dir);
+  });
   $('#p-go').addEventListener('click', e => { e.preventDefault(); doPrint(); });
 
   document.addEventListener('keydown', e => {
@@ -1662,6 +2057,7 @@ function wire() {
       return;
     }
     if (typing || e.altKey) return;
+    if (e.key === 'Escape' && ui.tool === 'area') { endAreaTool(); return; }
     if (e.key === ' ') { e.preventDefault(); if (!spaceDown) { spaceDown = true; $('#scroller').classList.add('panning'); } return; }
     const tk = /^[1-9]$/.test(e.key) ? TERRAINS[+e.key - 1] : TERRAINS.find(t => t.key && t.key.toLowerCase() === e.key.toLowerCase());
     if (tk) { ui.terrain = tk.id; if (ui.tool !== 'fill') ui.tool = 'terrain'; refreshToolUI(); return; }
